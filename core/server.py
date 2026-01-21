@@ -420,7 +420,28 @@ async def health_check(request: Request):
         }
     )
 
+from starlette.responses import RedirectResponse
 
+@server.custom_route("/.well-known/oauth-authorization-server/mcp", methods=["GET", "HEAD", "OPTIONS"])
+async def oauth_authorization_server_mcp_alias(request: Request):
+    """
+    Alias for ChatGPT compatibility.
+    ChatGPT requests /.well-known/oauth-authorization-server/mcp
+    but FastMCP only exposes the root endpoint.
+    """
+    if request.method == "OPTIONS":
+        return JSONResponse(
+            content={},
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+            }
+        )
+    return RedirectResponse(
+        url="/.well-known/oauth-authorization-server",
+        status_code=307
+    )
+    
 @server.custom_route("/attachments/{file_id}", methods=["GET"])
 async def serve_attachment(file_id: str):
     """Serve a stored attachment file."""
