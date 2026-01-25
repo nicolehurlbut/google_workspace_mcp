@@ -60,7 +60,7 @@ for tool_name, tool_def in registry.items():
     # 2. Wrap Logic
     original_func = tool_def.fn
     
-    # We define a factory to capture the original_func in the closure correctly
+    # Factory to safely capture closure variables
     def create_secured_func(func):
         @wraps(func)
         async def secured_proxy(*args, **kwargs):
@@ -73,11 +73,19 @@ for tool_name, tool_def in registry.items():
             return await func(*args, **kwargs)
         return secured_proxy
 
-    # 3. Register on NEW Server
-    # FIX: Using positional name and description to avoid TypeError
     secured_fn = create_secured_func(original_func)
-    strict_mcp.add_tool(secured_fn, tool_name, tool_def.description)
-    count += 1
+
+    # 3. Register on NEW Server (FIXED)
+    # We use strict_mcp.tool() as a function that returns a decorator, 
+    # then immediately call it with our function.
+    try:
+        strict_mcp.tool(
+            name=tool_name, 
+            description=tool_def.description
+        )(secured_fn)
+        count += 1
+    except Exception as e:
+        logger.error(f"⚠️ Failed to register tool {tool_name}: {e}")
 
 logger.info(f"✅ Secure Server Ready with {count} tools.")
 
@@ -93,7 +101,6 @@ if __name__ == "__main__":
             path = scope.get("path", "")
             if path.endswith("/sse"):
                 headers = dict(scope.get("headers", []))
-                # Check for authorization header (lowercase in Starlette)
                 if b"authorization" not in headers:
                     logger.warning("⛔ No Token on /sse - Sending 401")
                     response = JSONResponse(
