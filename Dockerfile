@@ -1,16 +1,15 @@
 FROM python:3.11-slim
 
-WORKDIR /app
+# 1. Use a DIFFERENT folder for the code (Avoids the secret mount conflict)
+WORKDIR /server
 
-# 1. Install system tools
+# 2. Install system tools
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
-# 2. COPY THE APP (Explicitly, so we know it's there)
-COPY secure_app.py /app/secure_app.py
+# 3. Copy the app to the NEW location
+COPY secure_app.py /server/secure_app.py
 
-# 3. INSTALL DEPENDENCIES (Critical Fix: We hardcode these to ensure they exist)
-# We install 'mcp' and 'google-api-python-client' which are the core requirements.
-# If you know you used a specific library like 'fastmcp', we install that too.
+# 4. Install dependencies (Hardcoded for safety)
 RUN pip install --no-cache-dir \
     fastmcp \
     "mcp[cli]" \
@@ -19,20 +18,23 @@ RUN pip install --no-cache-dir \
     uvicorn \
     starlette
 
-# 4. Copy any other files (like requirements.txt if it exists)
+# 5. Copy everything else
 COPY . .
 
-# 5. Create user
-RUN useradd --create-home --shell /bin/bash app && chown -R app:app /app
+# 6. Create user & Fix Permissions
+RUN useradd --create-home --shell /bin/bash app 
+# Give user ownership of BOTH folders
+RUN chown -R app:app /server && mkdir -p /app && chown -R app:app /app
 USER app
 
-# 6. Configuration
+# 7. Config
 ENV PORT=8080
 ENV HOST=0.0.0.0
 ENV PYTHONUNBUFFERED=1 
+# The secret still lives in the old spot (safe and isolated now)
 ENV GOOGLE_APPLICATION_CREDENTIALS="/app/service-account.json"
 
 EXPOSE 8080
 
-# 7. RUN COMMAND (Using the explicit path)
-CMD ["python", "/app/secure_app.py"]
+# 8. Run from the NEW location
+CMD ["python", "/server/secure_app.py"]
