@@ -25,5 +25,7 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8080
 
+ENV ALLOWED_FILE_IDS="1wWFPnXLrO8085m0Cq01xPtpjw7vsqCecJgJrVABNgfg"
+
 # 6. Run the Secure App directly
 CMD ["python", "secure_app.py"]
