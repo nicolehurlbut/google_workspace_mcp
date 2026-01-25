@@ -40,6 +40,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 ENV TOOL_TIER=""
 ENV TOOLS=""
 
-# Use entrypoint for the base command and CMD for args
-ENTRYPOINT ["/bin/sh", "-c"]
-CMD ["uv run main.py --transport streamable-http ${TOOL_TIER:+--tool-tier \"$TOOL_TIER\"} ${TOOLS:+--tools $TOOLS}"]
+# --- THE KEY CHANGE IS HERE ---
+# We run the bridge.py script directly using python (or via uv if managed)
+# The bridge.py script will handle the server start
+CMD ["python", "bridge.py"]
