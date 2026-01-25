@@ -3,16 +3,15 @@ import sys
 import logging
 import inspect
 from functools import wraps
-from fastmcp import FastMCP, Context
+from fastmcp import FastMCP
 import uvicorn
 from starlette.responses import JSONResponse
-from starlette.routing import Route
 
-# --- LOGGING SETUP ---
+# --- LOGGING ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("secure_proxy")
 
-# --- CONFIGURATION ---
+# --- CONFIG ---
 os.environ["MCP_ENABLE_OAUTH21"] = "true"
 os.environ["EXTERNAL_OAUTH21_PROVIDER"] = "true"
 os.environ["WORKSPACE_MCP_STATELESS_MODE"] = "true"
@@ -24,90 +23,102 @@ ALLOWED_FILE_IDS = [
     if id.strip()
 ]
 
-# --- IMPORT ORIGINAL SERVER ---
+# --- IMPORT SERVER ---
 try:
-    from fastmcp_server import mcp as original_server
+    # We use the ORIGINAL server object instead of creating a new one
+    from fastmcp_server import mcp as server
     logger.info("✅ Imported original server.")
 except ImportError:
     logger.critical("❌ Could not import 'fastmcp_server'.")
     sys.exit(1)
 
-# --- CREATE NEW STRICT SERVER ---
-strict_mcp = FastMCP("Secure Google Workspace")
-
-# --- HELPER: FIND TOOLS ---
-def get_all_tools(obj):
+# --- RECURSIVE TOOL FINDER ---
+def get_tool_registry(obj):
+    # 1. Check Manager (New FastMCP)
+    if hasattr(obj, "_tool_manager"):
+        tm = obj._tool_manager
+        if hasattr(tm, "_tools"): return tm._tools
+        if hasattr(tm, "tools"): return tm.tools
+    
+    # 2. Check Direct Attributes
     candidates = ["_tool_registry", "tools", "_tools", "registry"]
     for attr in candidates:
         if hasattr(obj, attr):
-            val = getattr(obj, attr)
-            if isinstance(val, dict) and len(val) > 0: return val
-    if hasattr(obj, "_tool_manager"): return get_all_tools(obj._tool_manager)
-    if hasattr(obj, "mcp"): return get_all_tools(obj.mcp)
-    return {}
-
-# --- TRANSFER & SECURE TOOLS ---
-registry = get_all_tools(original_server)
-if not registry:
-    logger.critical("🛑 CRITICAL: Could not find tools to copy.")
-    sys.exit(1)
-
-count = 0
-for tool_name, tool_def in registry.items():
-    t_name = tool_name.lower()
-    if not any(svc in t_name for svc in ALLOWED_SERVICES): continue
-    if any(b in t_name for b in BLOCKED_KEYWORDS): continue
+            return getattr(obj, attr)
+            
+    # 3. Check Wrappers
+    if hasattr(obj, "mcp"): return get_tool_registry(obj.mcp)
+    if hasattr(obj, "_mcp"): return get_tool_registry(obj._mcp)
     
-    original_func = tool_def.fn
+    return None
+
+# --- SECURE TOOLS IN-PLACE ---
+try:
+    registry = get_tool_registry(server)
+    if not registry:
+        raise Exception("Could not find tool registry")
     
-    def create_secured_func(func):
-        @wraps(func)
+    logger.info(f"ℹ️  Found {len(registry)} tools. Modifying in-place...")
+    
+    # Identify tools to remove vs secure
+    to_remove = []
+    to_secure = []
+
+    for name, tool in registry.items():
+        t_name = name.lower()
+        if not any(s in t_name for s in ALLOWED_SERVICES) or any(b in t_name for b in BLOCKED_KEYWORDS):
+            to_remove.append(name)
+        else:
+            to_secure.append(name)
+
+    # 1. REMOVE TOOLS
+    for name in to_remove:
+        # We delete directly from the dictionary to be sure
+        del registry[name]
+    logger.info(f"🚫 Removed {len(to_remove)} blocked tools.")
+
+    # 2. SECURE TOOLS
+    for name in to_secure:
+        tool_obj = registry[name]
+        original_func = tool_obj.fn
+        
+        # Create wrapper
+        @wraps(original_func)
         async def secured_proxy(*args, **kwargs):
+            # Enforce Allowlist
             if ALLOWED_FILE_IDS:
                 for k, v in kwargs.items():
                     if isinstance(v, str) and "id" in k.lower() and len(v) > 5:
                         if v not in ALLOWED_FILE_IDS:
                             raise ValueError(f"⛔ ACCESS DENIED: File ID {v} not allowed.")
-            return await func(*args, **kwargs)
-        return secured_proxy
+            return await original_func(*args, **kwargs)
+        
+        # Replace the function ON THE EXISTING TOOL
+        tool_obj.fn = secured_proxy
 
-    secured_fn = create_secured_func(original_func)
+    logger.info(f"✅ Secured {len(to_secure)} tools.")
 
-    try:
-        strict_mcp.tool(name=tool_name, description=tool_def.description)(secured_fn)
-        count += 1
-    except Exception as e:
-        logger.error(f"⚠️ Failed to register tool {tool_name}: {e}")
+except Exception as e:
+    logger.critical(f"❌ Failed to secure tools: {e}")
+    sys.exit(1)
 
-logger.info(f"✅ Secure Server Ready with {count} tools.")
-
-# --- HELPER: FIND ASGI APP ---
-def find_asgi_app(mcp_obj):
-    methods = ["_create_asgi_app", "create_asgi_app", "get_asgi_app"]
-    for m in methods:
-        if hasattr(mcp_obj, m) and callable(getattr(mcp_obj, m)):
-            return getattr(mcp_obj, m)()
-    attrs = ["app", "_app", "fastapi_app", "http_app"]
-    for a in attrs:
-        if hasattr(mcp_obj, a):
-            return getattr(mcp_obj, a)
-    if hasattr(mcp_obj, "_mcp_server"):
-        return find_asgi_app(mcp_obj._mcp_server)
-    return None
-
-# --- RUN SERVER WITH SHIM ---
+# --- MIDDLEWARE & SHIM ---
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    
-    try:
-        original_app = find_asgi_app(strict_mcp)
-        if not original_app: raise AttributeError("No App Found")
-    except:
-        strict_mcp.run(transport="sse", host="0.0.0.0", port=port)
-        sys.exit(0)
 
-    # --- IDENTITY SHIM CONFIG ---
-    # This tells ChatGPT to use Google for login
+    # Helper to extract the internal ASGI app
+    def get_app(obj):
+        for m in ["_create_asgi_app", "create_asgi_app", "get_asgi_app"]:
+            if hasattr(obj, m): return getattr(obj, m)()
+        return getattr(obj, "fastapi_app", None)
+
+    # Get the app from the NOW MODIFIED server
+    original_app = get_app(server)
+    if not original_app:
+        logger.critical("Could not find internal app.")
+        sys.exit(1)
+
+    # GOOGLE CONFIG
     GOOGLE_CONFIG = {
         "issuer": "https://accounts.google.com",
         "authorization_endpoint": "https://accounts.google.com/o/oauth2/auth",
@@ -119,31 +130,27 @@ if __name__ == "__main__":
         "scopes_supported": ["openid", "email", "profile", "https://www.googleapis.com/auth/drive.readonly"]
     }
 
-    async def middleware_and_shim(scope, receive, send):
+    async def secure_middleware(scope, receive, send):
         if scope["type"] == "http":
             path = scope.get("path", "")
             
-            # 1. SHIM: Serve Discovery Files
+            # 1. SHIM: Catch OIDC requests
             if path in ["/.well-known/openid-configuration", "/.well-known/oauth-authorization-server"]:
-                logger.info(f"ℹ️  Serving OIDC Config to {path}")
+                logger.info(f"ℹ️  Serving OIDC Config")
                 response = JSONResponse(GOOGLE_CONFIG)
                 await response(scope, receive, send)
                 return
 
-            # 2. AUTH CHECK: Enforce login on /sse
+            # 2. AUTH: Protect /sse
             if path.endswith("/sse"):
                 headers = dict(scope.get("headers", []))
                 if b"authorization" not in headers:
                     logger.warning("⛔ No Token on /sse - Sending 401")
-                    response = JSONResponse(
-                        {"error": "Authentication required"}, 
-                        status_code=401, 
-                        headers={"WWW-Authenticate": "Bearer"}
-                    )
+                    response = JSONResponse({"error": "Auth Required"}, status_code=401, headers={"WWW-Authenticate": "Bearer"})
                     await response(scope, receive, send)
                     return
 
         await original_app(scope, receive, send)
 
-    logger.info(f"🚀 Starting STRICT server with OIDC Shim on port {port}")
-    uvicorn.run(middleware_and_shim, host="0.0.0.0", port=port)
+    logger.info(f"🚀 Starting In-Place Secured Server on {port}")
+    uvicorn.run(secure_middleware, host="0.0.0.0", port=port)
