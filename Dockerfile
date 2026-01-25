@@ -5,8 +5,11 @@ WORKDIR /app
 # 1. Install system tools
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
-# 2. Copy ALL project files (This now includes service-account.json)
+# 2. Copy ALL files
 COPY . .
+
+# --- DEBUG STEP: Print all files to the build log ---
+RUN echo "⬇️ ⬇️ ⬇️ CONTENTS OF /APP ⬇️ ⬇️ ⬇️" && ls -la /app && echo "⬆️ ⬆️ ⬆️ END CONTENTS ⬆️ ⬆️ ⬆️"
 
 # 3. Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
@@ -19,9 +22,7 @@ USER app
 ENV PORT=8080
 ENV HOST=0.0.0.0
 ENV PYTHONUNBUFFERED=1 
-
-# Point to the key file inside the container
-ENV GOOGLE_APPLICATION_CREDENTIALS="/app/service-account-json"
+ENV GOOGLE_APPLICATION_CREDENTIALS="/app/service-account.json"
 
 EXPOSE 8080
 

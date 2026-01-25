@@ -14,28 +14,4 @@ htmlcov/
 .coverage
 pytest_out.txt
 
-# Build artifacts
-build/
-dist/
-*.egg-info/
 
-# Development files
-mcp_server_debug.log
-.credentials/
-
-# Cache and temporary files
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-.pytest_cache/
-
-# IDE files
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS files
-.DS_Store
