@@ -21,10 +21,12 @@ ALLOWED_FILE_IDS = [
 
 # --- IMPORT SERVER ---
 try:
-    from fastmcp_server import mcp as server
-    logger.info("✅ Imported original server.")
+    from fastmcp import FastMCP
+    # Initialize the server
+    server = FastMCP("google-workspace-mcp")
+    logger.info("✅ Imported FastMCP server.")
 except ImportError:
-    logger.critical("❌ Could not import 'fastmcp_server'.")
+    logger.critical("❌ Could not import 'fastmcp'.")
     sys.exit(1)
 
 # --- SECURE TOOLS ---
