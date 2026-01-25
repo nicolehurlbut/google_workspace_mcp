@@ -21,7 +21,7 @@ ENV HOST=0.0.0.0
 ENV PYTHONUNBUFFERED=1 
 
 # Point to the key file inside the container
-ENV GOOGLE_APPLICATION_CREDENTIALS="/app/service-account.json"
+ENV GOOGLE_APPLICATION_CREDENTIALS="/app/service-account-json"
 
 EXPOSE 8080
 
