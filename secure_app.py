@@ -27,8 +27,7 @@ BLOCKED_KEYWORDS = ["create", "update", "delete", "modify", "append", "write", "
 
 # We create a new MCP server that will "host" the filtered tools
 secure_mcp = FastMCP(
-    "Secure Google Workspace App", 
-    description="Read-only, restricted access to specific Google files."
+    "Secure Google Workspace App"
 )
 
 # --- TOOL FILTERING & WRAPPING ---
