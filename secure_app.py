@@ -86,4 +86,8 @@ print(f"✅ Registered {registered_count} secure tools.")
 
 # This runs the server using the 'streamable-http' transport required by ChatGPT Apps
 if __name__ == "__main__":
-    secure_mcp.run(transport="sse")
+    # Get the PORT from Google Cloud (defaults to 8080 if not set)
+    port = int(os.environ.get("PORT", 8080))
+    
+    # Run the server binding to 0.0.0.0 (required for Cloud Run)
+    secure_mcp.run(transport="sse", host="0.0.0.0", port=port)
