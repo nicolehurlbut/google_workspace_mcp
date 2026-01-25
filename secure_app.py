@@ -1,16 +1,22 @@
 import os
-import inspect
 import sys
+import logging
+import inspect
 from functools import wraps
-from fastmcp import FastMCP
+from fastmcp import FastMCP, Context
+from fastmcp.exceptions import FastMCPError
+
+# --- LOGGING SETUP ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("secure_proxy")
 
 # --- CONFIGURATION ---
-# Must be set BEFORE importing the server to trigger correct auth modes
+# We enable these to ensure the underlying tools know how to handle tokens
 os.environ["MCP_ENABLE_OAUTH21"] = "true"
 os.environ["EXTERNAL_OAUTH21_PROVIDER"] = "true"
 os.environ["WORKSPACE_MCP_STATELESS_MODE"] = "true"
 
-# Security Rules
+# Security Allowlist
 ALLOWED_SERVICES = ["drive", "sheet", "doc", "slide", "form"]
 BLOCKED_KEYWORDS = ["create", "update", "delete", "modify", "append", "write", "trash", "upload"]
 ALLOWED_FILE_IDS = [
@@ -18,116 +24,140 @@ ALLOWED_FILE_IDS = [
     if id.strip()
 ]
 
-print("🔒 Starting Secure Proxy Initialization...")
-
-# --- IMPORT EXISTING SERVER ---
+# --- IMPORT ORIGINAL TOOLS ---
 try:
-    from fastmcp_server import mcp as server
+    from fastmcp_server import mcp as original_server
+    logger.info("✅ Imported original server.")
 except ImportError:
-    print("❌ Error: Could not import 'mcp' from 'fastmcp_server'.")
+    logger.critical("❌ Could not import 'fastmcp_server'.")
     sys.exit(1)
 
-# --- HELPER: FIND REGISTRY (Updated for your version) ---
-def get_tool_registry(mcp_obj):
-    """
-    Locates the dictionary where tools are stored.
-    Updated to support 'FastMCP._tool_manager'.
-    """
-    # 1. Check if we have a Tool Manager (New FastMCP structure)
-    if hasattr(mcp_obj, "_tool_manager"):
-        manager = mcp_obj._tool_manager
-        # The manager likely holds the dict in '_tools' or 'tools'
-        if hasattr(manager, "_tools"): return manager._tools
-        if hasattr(manager, "tools"): return manager.tools
-    
-    # 2. Check direct attributes (Older FastMCP structure)
+# --- CREATE NEW STRICT SERVER ---
+# We create a FRESH server to control the handshake logic
+strict_mcp = FastMCP("Secure Google Workspace")
+
+# --- HELPER: FIND TOOLS ---
+def get_all_tools(obj):
+    """Deep scan for tools in the original server object."""
     candidates = ["_tool_registry", "tools", "_tools", "registry"]
     for attr in candidates:
-        if hasattr(mcp_obj, attr):
-            return getattr(mcp_obj, attr)
-            
-    # 3. Check for wrappers (SecureFastMCP, etc)
-    if hasattr(mcp_obj, "mcp"): return get_tool_registry(mcp_obj.mcp)
-    if hasattr(mcp_obj, "_mcp"): return get_tool_registry(mcp_obj._mcp)
+        if hasattr(obj, attr):
+            val = getattr(obj, attr)
+            if isinstance(val, dict) and len(val) > 0: return val
     
-    # If still not found, print available attributes of the manager if it exists
-    if hasattr(mcp_obj, "_tool_manager"):
-         raise AttributeError(f"Found _tool_manager but could not find tools inside it. Manager attrs: {dir(mcp_obj._tool_manager)}")
-    
-    raise AttributeError(f"Could not find tool registry. Main object attrs: {dir(mcp_obj)}")
+    # Check Managers/Wrappers
+    if hasattr(obj, "_tool_manager"): return get_all_tools(obj._tool_manager)
+    if hasattr(obj, "mcp"): return get_all_tools(obj.mcp)
+    return {}
 
-# --- APPLY RESTRICTIONS ---
-try:
-    # Get the registry dictionary (e.g. { 'tool_name': ToolObject })
-    registry = get_tool_registry(server)
-    print(f"ℹ️  Found {len(registry)} tools. Applying security filters...")
-
-    tools_to_remove = []
-    tools_to_secure = []
-
-    # Identify tools to keep vs remove
-    for tool_name, tool_def in registry.items():
-        t_name = tool_name.lower()
-        
-        # Filter Logic
-        if not any(svc in t_name for svc in ALLOWED_SERVICES):
-            tools_to_remove.append(tool_name)
-            continue
-        if any(b in t_name for b in BLOCKED_KEYWORDS):
-            tools_to_remove.append(tool_name)
-            continue
-            
-        tools_to_secure.append(tool_name)
-
-    # REMOVE tools using the public API if possible, otherwise dict deletion
-    # Your log showed 'remove_tool' exists, which is safer!
-    for name in tools_to_remove:
-        if hasattr(server, "remove_tool"):
-            server.remove_tool(name)
-        else:
-            del registry[name]
-    
-    print(f"🚫 Removed {len(tools_to_remove)} blocked tools.")
-
-    # SECURE the remaining tools
-    for name in tools_to_secure:
-        original_tool = registry[name]
-        original_func = original_tool.fn
-
-        @wraps(original_func)
-        async def secured_proxy_func(*args, **kwargs):
-            # Inspect arguments
-            try:
-                sig = inspect.signature(original_func)
-                bound = sig.bind_partial(*args, **kwargs)
-                bound.apply_defaults()
-                all_args = bound.arguments
-            except:
-                all_args = kwargs
-
-            # Enforce File IDs
-            if ALLOWED_FILE_IDS:
-                for key, value in all_args.items():
-                    if isinstance(value, str) and ("id" in key.lower() or len(value) > 20):
-                        if len(value) > 10 and value not in ALLOWED_FILE_IDS:
-                            # Allow simple keywords, block complex IDs
-                            print(f"⛔ Blocked access to ID: {value}")
-                            raise ValueError(f"⛔ ACCESS DENIED: File ID {value} is not in the allowlist.")
-
-            return await original_func(*args, **kwargs)
-
-        # Update the function reference in the tool definition
-        original_tool.fn = secured_proxy_func
-
-    print(f"✅ Secured {len(tools_to_secure)} tools.")
-
-except Exception as e:
-    print(f"❌ Critical Error securing tools: {e}")
-    # We exit here because if security fails, we shouldn't run unsafe
+# --- TRANSFER & SECURE TOOLS ---
+registry = get_all_tools(original_server)
+if not registry:
+    logger.critical("🛑 CRITICAL: Could not find tools to copy.")
     sys.exit(1)
 
-# --- RUN SERVER ---
+count = 0
+for name, tool in registry.items():
+    t_name = name.lower()
+    
+    # 1. Filter
+    if not any(s in t_name for s in ALLOWED_SERVICES): continue
+    if any(b in t_name for b in BLOCKED_KEYWORDS): continue
+    
+    # 2. Wrap Logic
+    original_func = tool.fn
+    
+    @wraps(original_func)
+    async def secured_proxy(ctx: Context, *args, **kwargs):
+        # AUTH CHECK: The token comes in the context
+        # In External Mode, we rely on the token being valid.
+        # We can add extra validation here if needed.
+        
+        # FILE ID CHECK
+        all_args = kwargs.copy()
+        if ALLOWED_FILE_IDS:
+            for k, v in all_args.items():
+                if isinstance(v, str) and "id" in k.lower() and len(v) > 5:
+                    if v not in ALLOWED_FILE_IDS:
+                        raise ValueError(f"⛔ ACCESS DENIED: File ID {v} not allowed.")
+        
+        # Call Original
+        # We pass 'ctx' if the original function expects it
+        sig = inspect.signature(original_func)
+        if "ctx" in sig.parameters:
+            return await original_func(ctx=ctx, *args, **kwargs)
+        else:
+            return await original_func(*args, **kwargs)
+
+    # 3. Register on NEW Server
+    strict_mcp.add_tool(
+        name=name,
+        description=tool.description
+    )(secured_proxy)
+    count += 1
+
+logger.info(f"✅ Secure Server Ready with {count} tools.")
+
+# --- CUSTOM RUNNER WITH AUTH CHECK ---
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.requests import Request
+from starlette.responses import Response, JSONResponse
+import uvicorn
+
+# We mount the FastMCP app but intercept the handshake
+mcp_app = strict_mcp._create_asgi_app()
+
+async def auth_middleware(request: Request, call_next):
+    # Check if this is the SSE connection
+    if request.url.path.endswith("/sse"):
+        auth_header = request.headers.get("Authorization")
+        
+        logger.info(f"🔒 Handshake Attempt. Headers: {request.headers.keys()}")
+        
+        if not auth_header:
+            logger.warning("⛔ REJECTING Handshake: No Token Present")
+            # Return 401 to tell ChatGPT it needs to login
+            return JSONResponse(
+                {"error": "Authentication required"}, 
+                status_code=401, 
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+        else:
+            logger.info("✅ Token Present. Accepting connection.")
+
+    return await call_next(request)
+
+# Create the final app
+app = Starlette(middleware=[])
+# We have to wrap it manually since Starlette middleware syntax is different
+# Ideally, we just run uvicorn on the mcp_app but add the middleware
+
 if __name__ == "__main__":
+    # We patch the FastMCP app to include our auth check
+    # FastMCP uses Starlette internally.
+    original_app = strict_mcp._create_asgi_app()
+    
+    # Wrap in simple middleware function
+    async def app_wrapper(scope, receive, send):
+        if scope["type"] == "http":
+            headers = dict(scope.get("headers", []))
+            auth = headers.get(b"authorization")
+            
+            # If hitting /sse and no auth, reject
+            path = scope.get("path", "")
+            if path.endswith("/sse") and not auth:
+                logger.warning("⛔ No Token on /sse - Sending 401")
+                response = JSONResponse(
+                    {"error": "Missing Authorization Header"}, 
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"}
+                )
+                await response(scope, receive, send)
+                return
+
+        await original_app(scope, receive, send)
+
     port = int(os.environ.get("PORT", 8080))
-    # Run the server on 0.0.0.0 for Cloud Run
-    server.run(transport="sse", host="0.0.0.0", port=port)
+    logger.info(f"🚀 Starting STRICT server on port {port}")
+    uvicorn.run(app_wrapper, host="0.0.0.0", port=port)
