@@ -25,10 +25,8 @@ BLOCKED_KEYWORDS = ["create", "update", "delete", "modify", "append", "write", "
 
 # --- INITIALIZE SECURE SERVER ---
 
-# We create a new MCP server that will "host" the filtered tools
-secure_mcp = FastMCP(
-    "Secure Google Workspace App"
-)
+# FIX: Removed the 'description' argument which caused the error
+secure_mcp = FastMCP("Secure Google Workspace App")
 
 # --- TOOL FILTERING & WRAPPING ---
 
@@ -63,8 +61,6 @@ for tool_name, tool_def in original_mcp._tool_registry.items():
             for key, value in all_args.items():
                 # If a value looks like a file ID (string) and is NOT in the allowlist
                 if isinstance(value, str) and "id" in key.lower(): 
-                    # We only strictly check keys with "id" to avoid blocking normal text search queries
-                    # But for maximum security, you might check ALL strings.
                     if value not in ALLOWED_FILE_IDS:
                          raise ValueError(f"⛔ ACCESS DENIED: You are not allowed to access File ID: {value}")
         
@@ -83,7 +79,6 @@ print(f"✅ Registered {registered_count} secure tools.")
 
 # --- ENTRY POINT ---
 
-# This runs the server using the 'streamable-http' transport required by ChatGPT Apps
 if __name__ == "__main__":
     # Get the PORT from Google Cloud (defaults to 8080 if not set)
     port = int(os.environ.get("PORT", 8080))
