@@ -3,43 +3,25 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
-# Install uv for faster dependency management
+# Install uv
 RUN pip install --no-cache-dir uv
 
 COPY . .
 
-# Install Python dependencies using uv sync
+# Install dependencies (ensure 'fastmcp' is included)
 RUN uv sync --frozen --no-dev
 
-# Create non-root user for security
-RUN useradd --create-home --shell /bin/bash app \
-    && chown -R app:app /app
-
-# Give read and write access to the store_creds volume
-RUN mkdir -p /app/store_creds \
-    && chown -R app:app /app/store_creds \
-    && chmod 755 /app/store_creds
-
+# Create non-root user
+RUN useradd --create-home --shell /bin/bash app && chown -R app:app /app
 USER app
 
-# Expose port (use default of 8000 if PORT not set)
-EXPOSE 8000
-# Expose additional port if PORT environment variable is set to a different value
-ARG PORT
-EXPOSE ${PORT:-8000}
+ENV PORT=8080
+EXPOSE ${PORT}
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD sh -c 'curl -f http://localhost:${PORT:-8000}/health || exit 1'
-
-# Set environment variables for Python startup args
-ENV TOOL_TIER=""
-ENV TOOLS=""
-
-# Use entrypoint for the base command and CMD for args
-ENTRYPOINT ["/bin/sh", "-c"]
-CMD ["uv run main.py --transport streamable-http ${TOOL_TIER:+--tool-tier \"$TOOL_TIER\"} ${TOOLS:+--tools $TOOLS}"]
+# Run the Secure MCP App
+# We use 'uv run' to ensure we use the environment with dependencies
+# The --port and --host flags depend on how fastmcp implements run()
+# Usually fastmcp uses uvicorn under the hood. 
+CMD ["uv", "run", "secure_app.py"]

@@ -38,10 +38,30 @@ logger = logging.getLogger(__name__)
 
 # Constants
 def get_default_credentials_dir():
-    """Get the default credentials directory path, preferring user-specific locations."""
-    # Check for explicit environment variable override
-    if os.getenv("GOOGLE_MCP_CREDENTIALS_DIR"):
-        return os.getenv("GOOGLE_MCP_CREDENTIALS_DIR")
+    """Get the default credentials directory path, preferring user-specific locations.
+
+    Environment variable priority:
+    1. WORKSPACE_MCP_CREDENTIALS_DIR (preferred)
+    2. GOOGLE_MCP_CREDENTIALS_DIR (backward compatibility)
+    3. ~/.google_workspace_mcp/credentials (default)
+    """
+    # Check WORKSPACE_MCP_CREDENTIALS_DIR first (preferred)
+    workspace_creds_dir = os.getenv("WORKSPACE_MCP_CREDENTIALS_DIR")
+    if workspace_creds_dir:
+        expanded = os.path.expanduser(workspace_creds_dir)
+        logger.info(
+            f"Using credentials directory from WORKSPACE_MCP_CREDENTIALS_DIR: {expanded}"
+        )
+        return expanded
+
+    # Fall back to GOOGLE_MCP_CREDENTIALS_DIR for backward compatibility
+    google_creds_dir = os.getenv("GOOGLE_MCP_CREDENTIALS_DIR")
+    if google_creds_dir:
+        expanded = os.path.expanduser(google_creds_dir)
+        logger.info(
+            f"Using credentials directory from GOOGLE_MCP_CREDENTIALS_DIR: {expanded}"
+        )
+        return expanded
 
     # Use user home directory for credentials storage
     home_dir = os.path.expanduser("~")

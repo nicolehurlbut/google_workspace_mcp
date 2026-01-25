@@ -104,6 +104,7 @@ def main():
             "slides",
             "tasks",
             "search",
+            "appscript",
         ],
         help="Specify which tools to register. If not provided, all tools are registered.",
     )
@@ -153,10 +154,26 @@ def main():
         else "Invalid or too short"
     )
 
+    # Determine credentials directory (same logic as credential_store.py)
+    workspace_creds_dir = os.getenv("WORKSPACE_MCP_CREDENTIALS_DIR")
+    google_creds_dir = os.getenv("GOOGLE_MCP_CREDENTIALS_DIR")
+    if workspace_creds_dir:
+        creds_dir_display = os.path.expanduser(workspace_creds_dir)
+        creds_dir_source = "WORKSPACE_MCP_CREDENTIALS_DIR"
+    elif google_creds_dir:
+        creds_dir_display = os.path.expanduser(google_creds_dir)
+        creds_dir_source = "GOOGLE_MCP_CREDENTIALS_DIR"
+    else:
+        creds_dir_display = os.path.join(
+            os.path.expanduser("~"), ".google_workspace_mcp", "credentials"
+        )
+        creds_dir_source = "default"
+
     config_vars = {
         "GOOGLE_OAUTH_CLIENT_ID": os.getenv("GOOGLE_OAUTH_CLIENT_ID", "Not Set"),
         "GOOGLE_OAUTH_CLIENT_SECRET": redacted_secret,
         "USER_GOOGLE_EMAIL": os.getenv("USER_GOOGLE_EMAIL", "Not Set"),
+        "CREDENTIALS_DIR": f"{creds_dir_display} ({creds_dir_source})",
         "MCP_SINGLE_USER_MODE": os.getenv("MCP_SINGLE_USER_MODE", "false"),
         "MCP_ENABLE_OAUTH21": os.getenv("MCP_ENABLE_OAUTH21", "false"),
         "WORKSPACE_MCP_STATELESS_MODE": os.getenv(
@@ -184,6 +201,7 @@ def main():
         "slides": lambda: import_module("gslides.slides_tools"),
         "tasks": lambda: import_module("gtasks.tasks_tools"),
         "search": lambda: import_module("gsearch.search_tools"),
+        "appscript": lambda: import_module("gappsscript.apps_script_tools"),
     }
 
     tool_icons = {
@@ -197,6 +215,7 @@ def main():
         "slides": "🖼️",
         "tasks": "✓",
         "search": "🔍",
+        "appscript": "📜",
     }
 
     # Determine which tools to import based on arguments

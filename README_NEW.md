@@ -6,7 +6,7 @@
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![PyPI](https://img.shields.io/pypi/v/workspace-mcp.svg)](https://pypi.org/project/workspace-mcp/)
 
-**Complete Google Workspace control through natural language.** Gmail, Calendar, Drive, Docs, Sheets, Slides, Forms, Tasks, Chat, and Custom Search—all via MCP.
+**Complete Google Workspace control through natural language.** Gmail, Calendar, Drive, Docs, Sheets, Slides, Forms, Tasks, Chat, Apps Script, and Custom Search—all via MCP.
 
 [Quick Start](#-quick-start) • [Tools Reference](#-tools-reference) • [Configuration](#-configuration) • [OAuth Setup](#-oauth-setup)
 
@@ -167,6 +167,26 @@ export OAUTHLIB_INSECURE_TRANSPORT=1  # Development only
 | `delete_task_list` | Complete | Delete task lists (and all tasks) |
 | `move_task` | Complete | Reposition or move between lists |
 | `clear_completed_tasks` | Complete | Hide completed tasks |
+
+### Google Apps Script (11 tools)
+
+| Tool | Tier | Description |
+|------|------|-------------|
+| `list_script_projects` | Core | List accessible Apps Script projects |
+| `get_script_project` | Core | Get complete project with all files |
+| `get_script_content` | Core | Retrieve specific file content |
+| `create_script_project` | Core | Create new standalone or bound project |
+| `update_script_content` | Core | Update or create script files |
+| `run_script_function` | Core | Execute function with parameters |
+| `create_deployment` | Extended | Create new script deployment |
+| `list_deployments` | Extended | List all project deployments |
+| `update_deployment` | Extended | Update deployment configuration |
+| `delete_deployment` | Extended | Remove deployment |
+| `list_script_processes` | Extended | View recent executions and status |
+
+**Enables:** Cross-app automation, persistent workflows, custom business logic execution, script development and debugging
+
+**Note:** Trigger management is not currently supported via MCP tools.
 
 ### Google Chat (4 tools)
 

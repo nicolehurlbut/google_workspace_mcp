@@ -12,6 +12,9 @@ gmail:
     - list_gmail_labels
     - manage_gmail_label
     - draft_gmail_message
+    - list_gmail_filters
+    - create_gmail_filter
+    - delete_gmail_filter
 
   complete:
     - get_gmail_threads_content_batch
@@ -142,3 +145,25 @@ search:
     - search_custom_siterestrict
   complete:
     - get_search_engine_info
+
+appscript:
+  core:
+    - list_script_projects
+    - get_script_project
+    - get_script_content
+    - create_script_project
+    - update_script_content
+    - run_script_function
+    - generate_trigger_code
+  extended:
+    - create_deployment
+    - list_deployments
+    - update_deployment
+    - delete_deployment
+    - delete_script_project
+    - list_versions
+    - create_version
+    - get_version
+    - list_script_processes
+    - get_script_metrics
+  complete: []

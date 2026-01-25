@@ -75,6 +75,15 @@ A production-ready MCP server that integrates all major Google Workspace service
 - Spreadsheet operations with flexible cell management
 - Presentation creation, updates & content manipulation
 
+---
+
+**<span style="color:#72898f">◆</span> Apps Script**
+- Automate cross-application workflows with custom code
+- Execute existing business logic and custom functions
+- Manage script projects, deployments & versions
+- Debug and modify Apps Script code programmatically
+- Bridge Google Workspace services through automation
+
 </td>
 <td width="50%" valign="top">
 
@@ -285,6 +294,7 @@ Forms, Tasks, Chat, Search
 * [Enable Google Tasks API](https://console.cloud.google.com/flows/enableapi?apiid=tasks.googleapis.com)
 * [Enable Google Chat API](https://console.cloud.google.com/flows/enableapi?apiid=chat.googleapis.com)
 * [Enable Google Custom Search API](https://console.cloud.google.com/flows/enableapi?apiid=customsearch.googleapis.com)
+* [Enable Google Apps Script API](https://console.cloud.google.com/flows/enableapi?apiid=script.googleapis.com)
 
 </details>
 
@@ -845,6 +855,27 @@ cp .env.oauth21 .env
 | `search_custom` | **Core** | Perform web searches |
 | `get_search_engine_info` | Complete | Retrieve search engine metadata |
 | `search_custom_siterestrict` | Extended | Search within specific domains |
+
+</td>
+</tr>
+<tr>
+<td colspan="2" valign="top">
+
+### **Google Apps Script** <sub>[`apps_script_tools.py`](gappsscript/apps_script_tools.py)</sub>
+
+| Tool | Tier | Description |
+|------|------|-------------|
+| `list_script_projects` | **Core** | List accessible Apps Script projects |
+| `get_script_project` | **Core** | Get complete project with all files |
+| `get_script_content` | **Core** | Retrieve specific file content |
+| `create_script_project` | **Core** | Create new standalone or bound project |
+| `update_script_content` | **Core** | Update or create script files |
+| `run_script_function` | **Core** | Execute function with parameters |
+| `create_deployment` | Extended | Create new script deployment |
+| `list_deployments` | Extended | List all project deployments |
+| `update_deployment` | Extended | Update deployment configuration |
+| `delete_deployment` | Extended | Remove deployment |
+| `list_script_processes` | Extended | View recent executions and status |
 
 </td>
 </tr>
