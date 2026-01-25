@@ -5,27 +5,25 @@ WORKDIR /app
 # 1. Install system tools
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
-# 2. Install uv
-RUN pip install --no-cache-dir uv
-
-# 3. Copy files
+# 2. Copy ALL project files first
+# (Required because requirements.txt refers to the current folder with '-e .')
 COPY . .
 
-# 4. CONFIGURE UV TO USE SYSTEM PYTHON
-# instead of the --system flag, we tell uv where the environment is.
-# /usr/local is the default install location for python:slim images.
-ENV UV_PROJECT_ENVIRONMENT="/usr/local"
+# 3. Install dependencies using standard PIP
+# This reads the requirements.txt you generated with 'uv export'
+RUN pip install --no-cache-dir -r requirements.txt
 
-# 5. Sync dependencies
-# This will now verify the lockfile and install everything into /usr/local
-RUN uv sync --frozen --no-dev
-
-# 6. Create user & Permissions
+# 4. Create user & Permissions (Security Best Practice)
 RUN useradd --create-home --shell /bin/bash app && chown -R app:app /app
 USER app
 
+# 5. Configuration
 ENV PORT=8080
+ENV HOST=0.0.0.0
+# IMPORTANT: Force logs to show up immediately
+ENV PYTHONUNBUFFERED=1 
+
 EXPOSE 8080
 
-# 7. Run
+# 6. Run the Secure App directly
 CMD ["python", "secure_app.py"]
