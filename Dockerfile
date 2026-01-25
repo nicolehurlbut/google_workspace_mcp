@@ -9,16 +9,16 @@ RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 # 3. Copy the app to the NEW location
 COPY secure_app.py /server/secure_app.py
 
-# 4. Install dependencies (Hardcoded for safety)
+# 4. INSTALL DEPENDENCIES (The Fix)
+# We added 'fastmcp-server' back to the list.
 RUN pip install --no-cache-dir \
-    fastmcp \
-    "mcp[cli]" \
+    fastmcp-server \
     google-auth \
     google-api-python-client \
     uvicorn \
     starlette
 
-# 5. Copy everything else
+# 5. Copy everything else (in case you have local modules)
 COPY . .
 
 # 6. Create user & Fix Permissions
