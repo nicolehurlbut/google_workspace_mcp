@@ -6,7 +6,7 @@ from functools import wraps
 from fastmcp import FastMCP, Context
 import uvicorn
 from starlette.responses import JSONResponse
-from starlette.types import ASGIApp
+from starlette.routing import Route
 
 # --- LOGGING SETUP ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -83,45 +83,54 @@ logger.info(f"✅ Secure Server Ready with {count} tools.")
 
 # --- HELPER: FIND ASGI APP ---
 def find_asgi_app(mcp_obj):
-    """Hunts for the Starlette/FastAPI app inside FastMCP."""
-    # Check for method factories
     methods = ["_create_asgi_app", "create_asgi_app", "get_asgi_app"]
     for m in methods:
         if hasattr(mcp_obj, m) and callable(getattr(mcp_obj, m)):
             return getattr(mcp_obj, m)()
-
-    # Check for direct attributes
     attrs = ["app", "_app", "fastapi_app", "http_app"]
     for a in attrs:
         if hasattr(mcp_obj, a):
             return getattr(mcp_obj, a)
-            
-    # Check internal server
     if hasattr(mcp_obj, "_mcp_server"):
         return find_asgi_app(mcp_obj._mcp_server)
-        
     return None
 
-# --- RUN SERVER WITH MIDDLEWARE ---
+# --- RUN SERVER WITH SHIM ---
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     
-    # 1. FIND THE APP
     try:
         original_app = find_asgi_app(strict_mcp)
-        if not original_app:
-            raise AttributeError("Could not find ASGI app")
-        logger.info(f"✅ Found ASGI App: {type(original_app)}")
-    except Exception as e:
-        logger.warning(f"⚠️ Could not wrap app for Auth: {e}")
-        logger.warning("🚀 Starting without Auth Middleware (Login might fail)...")
+        if not original_app: raise AttributeError("No App Found")
+    except:
         strict_mcp.run(transport="sse", host="0.0.0.0", port=port)
         sys.exit(0)
 
-    # 2. DEFINE MIDDLEWARE
-    async def auth_middleware(scope, receive, send):
+    # --- IDENTITY SHIM CONFIG ---
+    # This tells ChatGPT to use Google for login
+    GOOGLE_CONFIG = {
+        "issuer": "https://accounts.google.com",
+        "authorization_endpoint": "https://accounts.google.com/o/oauth2/auth",
+        "token_endpoint": "https://oauth2.googleapis.com/token",
+        "jwks_uri": "https://www.googleapis.com/oauth2/v3/certs",
+        "response_types_supported": ["code", "token", "id_token"],
+        "subject_types_supported": ["public"],
+        "id_token_signing_alg_values_supported": ["RS256"],
+        "scopes_supported": ["openid", "email", "profile", "https://www.googleapis.com/auth/drive.readonly"]
+    }
+
+    async def middleware_and_shim(scope, receive, send):
         if scope["type"] == "http":
             path = scope.get("path", "")
+            
+            # 1. SHIM: Serve Discovery Files
+            if path in ["/.well-known/openid-configuration", "/.well-known/oauth-authorization-server"]:
+                logger.info(f"ℹ️  Serving OIDC Config to {path}")
+                response = JSONResponse(GOOGLE_CONFIG)
+                await response(scope, receive, send)
+                return
+
+            # 2. AUTH CHECK: Enforce login on /sse
             if path.endswith("/sse"):
                 headers = dict(scope.get("headers", []))
                 if b"authorization" not in headers:
@@ -133,8 +142,8 @@ if __name__ == "__main__":
                     )
                     await response(scope, receive, send)
                     return
+
         await original_app(scope, receive, send)
 
-    # 3. RUN
-    logger.info(f"🚀 Starting STRICT server on port {port}")
-    uvicorn.run(auth_middleware, host="0.0.0.0", port=port)
+    logger.info(f"🚀 Starting STRICT server with OIDC Shim on port {port}")
+    uvicorn.run(middleware_and_shim, host="0.0.0.0", port=port)
