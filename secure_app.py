@@ -4,6 +4,9 @@ import logging
 import inspect
 from functools import wraps
 from fastmcp import FastMCP, Context
+import uvicorn
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp
 
 # --- LOGGING SETUP ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -52,19 +55,14 @@ if not registry:
 count = 0
 for tool_name, tool_def in registry.items():
     t_name = tool_name.lower()
-    
-    # 1. Filter
     if not any(svc in t_name for svc in ALLOWED_SERVICES): continue
     if any(b in t_name for b in BLOCKED_KEYWORDS): continue
     
-    # 2. Wrap Logic
     original_func = tool_def.fn
     
-    # Factory to safely capture closure variables
     def create_secured_func(func):
         @wraps(func)
         async def secured_proxy(*args, **kwargs):
-            # Enforce Allowlist for File IDs
             if ALLOWED_FILE_IDS:
                 for k, v in kwargs.items():
                     if isinstance(v, str) and "id" in k.lower() and len(v) > 5:
@@ -75,28 +73,53 @@ for tool_name, tool_def in registry.items():
 
     secured_fn = create_secured_func(original_func)
 
-    # 3. Register on NEW Server (FIXED)
-    # We use strict_mcp.tool() as a function that returns a decorator, 
-    # then immediately call it with our function.
     try:
-        strict_mcp.tool(
-            name=tool_name, 
-            description=tool_def.description
-        )(secured_fn)
+        strict_mcp.tool(name=tool_name, description=tool_def.description)(secured_fn)
         count += 1
     except Exception as e:
         logger.error(f"⚠️ Failed to register tool {tool_name}: {e}")
 
 logger.info(f"✅ Secure Server Ready with {count} tools.")
 
-# --- HANDSHAKE INTERCEPTOR ---
-import uvicorn
-from starlette.responses import JSONResponse
+# --- HELPER: FIND ASGI APP ---
+def find_asgi_app(mcp_obj):
+    """Hunts for the Starlette/FastAPI app inside FastMCP."""
+    # Check for method factories
+    methods = ["_create_asgi_app", "create_asgi_app", "get_asgi_app"]
+    for m in methods:
+        if hasattr(mcp_obj, m) and callable(getattr(mcp_obj, m)):
+            return getattr(mcp_obj, m)()
 
+    # Check for direct attributes
+    attrs = ["app", "_app", "fastapi_app", "http_app"]
+    for a in attrs:
+        if hasattr(mcp_obj, a):
+            return getattr(mcp_obj, a)
+            
+    # Check internal server
+    if hasattr(mcp_obj, "_mcp_server"):
+        return find_asgi_app(mcp_obj._mcp_server)
+        
+    return None
+
+# --- RUN SERVER WITH MIDDLEWARE ---
 if __name__ == "__main__":
-    original_app = strict_mcp._create_asgi_app()
+    port = int(os.environ.get("PORT", 8080))
     
-    async def app_wrapper(scope, receive, send):
+    # 1. FIND THE APP
+    try:
+        original_app = find_asgi_app(strict_mcp)
+        if not original_app:
+            raise AttributeError("Could not find ASGI app")
+        logger.info(f"✅ Found ASGI App: {type(original_app)}")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not wrap app for Auth: {e}")
+        logger.warning("🚀 Starting without Auth Middleware (Login might fail)...")
+        strict_mcp.run(transport="sse", host="0.0.0.0", port=port)
+        sys.exit(0)
+
+    # 2. DEFINE MIDDLEWARE
+    async def auth_middleware(scope, receive, send):
         if scope["type"] == "http":
             path = scope.get("path", "")
             if path.endswith("/sse"):
@@ -110,9 +133,8 @@ if __name__ == "__main__":
                     )
                     await response(scope, receive, send)
                     return
-
         await original_app(scope, receive, send)
 
-    port = int(os.environ.get("PORT", 8080))
+    # 3. RUN
     logger.info(f"🚀 Starting STRICT server on port {port}")
-    uvicorn.run(app_wrapper, host="0.0.0.0", port=port)
+    uvicorn.run(auth_middleware, host="0.0.0.0", port=port)
