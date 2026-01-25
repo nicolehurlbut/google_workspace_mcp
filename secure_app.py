@@ -29,7 +29,6 @@ except ImportError:
 
 # --- SECURE TOOLS ---
 try:
-    # Helper to find the registry in different versions of FastMCP
     def get_tool_registry(obj):
         if hasattr(obj, "_tool_manager"): 
             tm = obj._tool_manager
@@ -38,6 +37,18 @@ try:
         for attr in ["_tool_registry", "tools", "_tools", "registry"]:
             if hasattr(obj, attr): return getattr(obj, attr)
         return None
+
+    # --- THE FIX: Factory function to capture the correct 'orig_fn' ---
+    def create_security_proxy(orig_fn):
+        @wraps(orig_fn)
+        async def secured_proxy(*args, **kwargs):
+            if ALLOWED_FILE_IDS:
+                for k, v in kwargs.items():
+                    if isinstance(v, str) and "id" in k.lower() and len(v) > 5 and v not in ALLOWED_FILE_IDS:
+                        raise ValueError(f"⛔ ACCESS DENIED: File ID {v} not allowed.")
+            return await orig_fn(*args, **kwargs)
+        return secured_proxy
+    # ----------------------------------------------------------------
 
     registry = get_tool_registry(server)
 
@@ -49,18 +60,11 @@ try:
         for name in to_remove:
             del registry[name]
         
-        # 2. Add File ID Checks to Remaining Tools
+        # 2. Add Security Proxy (Using the fixed Factory)
         for name in registry:
             tool = registry[name]
-            orig_fn = tool.fn
-            @wraps(orig_fn)
-            async def secured_proxy(*args, **kwargs):
-                if ALLOWED_FILE_IDS:
-                    for k,v in kwargs.items():
-                        if isinstance(v, str) and "id" in k.lower() and len(v)>5 and v not in ALLOWED_FILE_IDS:
-                            raise ValueError(f"⛔ ACCESS DENIED: File ID {v} not allowed.")
-                return await orig_fn(*args, **kwargs)
-            tool.fn = secured_proxy
+            # We call the factory function to create a FRESH wrapper for THIS specific tool
+            tool.fn = create_security_proxy(tool.fn)
             
         logger.info(f"✅ Security Active. Tools available: {len(registry)}")
     else:
@@ -71,9 +75,6 @@ except Exception as e:
 
 # --- RUN THE SERVER ---
 if __name__ == "__main__":
-    # CRITICAL FIX: Explicitly tell the server to listen on 0.0.0.0 and port 8080
-    # This overrides the default 127.0.0.1:8000 that was causing the crash
     port = int(os.environ.get("PORT", 8080))
     logger.info(f"🚀 Starting Server on 0.0.0.0:{port}")
-    
     server.run(transport="sse", host="0.0.0.0", port=port)
