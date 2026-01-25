@@ -25,16 +25,52 @@ BLOCKED_KEYWORDS = ["create", "update", "delete", "modify", "append", "write", "
 
 # --- INITIALIZE SECURE SERVER ---
 
-# FIX: Removed the 'description' argument which caused the error
+# We remove the 'description' argument as it caused an error in your version
 secure_mcp = FastMCP("Secure Google Workspace App")
+
+# --- HELPER: Find the Tool Registry ---
+
+def get_tool_registry(mcp_obj):
+    """
+    Attempts to find the tool registry in the mcp object, handling 
+    custom wrappers like SecureFastMCP or different FastMCP versions.
+    """
+    # List of possible attribute names where tools might be stored
+    candidates = ["_tool_registry", "tools", "_tools", "registry"]
+    
+    # 1. Check direct attributes
+    for attr in candidates:
+        if hasattr(mcp_obj, attr):
+            return getattr(mcp_obj, attr)
+            
+    # 2. Check if it's a wrapper (e.g. has .mcp or ._mcp inside)
+    if hasattr(mcp_obj, "mcp"):
+        return get_tool_registry(mcp_obj.mcp)
+    if hasattr(mcp_obj, "_mcp"):
+        return get_tool_registry(mcp_obj._mcp)
+        
+    # 3. If we can't find it, print debug info and crash
+    print(f"❌ CRITICAL ERROR: Could not find tool registry in {type(mcp_obj)}")
+    print(f"Available attributes: {dir(mcp_obj)}")
+    raise AttributeError("Could not find tool registry to secure.")
 
 # --- TOOL FILTERING & WRAPPING ---
 
 print("🔒 Initializing Secure MCP Wrapper...")
 registered_count = 0
 
+# Retrieve the registry using our robust helper
+try:
+    source_registry = get_tool_registry(original_mcp)
+except Exception as e:
+    print(f"⚠️ Failed to inspect original MCP: {e}")
+    source_registry = {}
+
 # Iterate through the original server's tools
-for tool_name, tool_def in original_mcp._tool_registry.items():
+# Note: depending on version, items() might be (name, tool) or just a list
+items = source_registry.items() if hasattr(source_registry, "items") else []
+
+for tool_name, tool_def in items:
     t_name = tool_name.lower()
     
     # FILTER 1: Must be in allowed services
@@ -59,7 +95,6 @@ for tool_name, tool_def in original_mcp._tool_registry.items():
         # Check every argument value
         if ALLOWED_FILE_IDS:
             for key, value in all_args.items():
-                # If a value looks like a file ID (string) and is NOT in the allowlist
                 if isinstance(value, str) and "id" in key.lower(): 
                     if value not in ALLOWED_FILE_IDS:
                          raise ValueError(f"⛔ ACCESS DENIED: You are not allowed to access File ID: {value}")
@@ -80,8 +115,6 @@ print(f"✅ Registered {registered_count} secure tools.")
 # --- ENTRY POINT ---
 
 if __name__ == "__main__":
-    # Get the PORT from Google Cloud (defaults to 8080 if not set)
     port = int(os.environ.get("PORT", 8080))
-    
-    # Run the server binding to 0.0.0.0 (required for Cloud Run)
+    # Listen on 0.0.0.0 to expose to Cloud Run
     secure_mcp.run(transport="sse", host="0.0.0.0", port=port)
