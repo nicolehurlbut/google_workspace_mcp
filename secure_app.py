@@ -88,40 +88,52 @@ async def oauth_token(request: Request):
 
 class OAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        # Allow OAuth and Health endpoints to pass without a token
+        # 1. Allow Auth/Health endpoints to pass
         if request.url.path in ["/", "/health", "/authorize", "/token", "/.well-known/oauth-authorization-server"]:
             return await call_next(request)
 
+        # 2. Extract the token
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
-            logger.warning("🚫 401: No Bearer token in header")
             return JSONResponse(status_code=401, content={"error": "Missing Token"})
-
+        
         token = auth_header.split(" ")[1]
-        try:
-            # FIX: We add 'audience=None' to allow ChatGPT's specific token format 
-            # while still verifying the signature and the 'hd' (hosted domain) claim.
-            id_info = id_token.verify_oauth2_token(
-                token, 
-                google_requests.Request(), 
-                audience=None 
-            )
-            
-            user_domain = id_info.get('hd')
-            user_email = id_info.get('email')
 
-            if user_domain != ALLOWED_DOMAIN:
-                logger.warning(f"⛔ 403: Blocked external user {user_email}")
-                return JSONResponse(status_code=403, content={"error": f"Must use {ALLOWED_DOMAIN}"})
+        # 3. Verify the token with Google's TokenInfo API
+        # This works for BOTH 'ya29' Access Tokens and ID Tokens
+        async with httpx.AsyncClient() as client:
+            try:
+                # We call Google's validation endpoint
+                response = await client.get(
+                    "https://oauth2.googleapis.com/tokeninfo",
+                    params={"access_token": token}
+                )
                 
-            logger.info(f"✅ 200: Access granted to {user_email}")
-            return await call_next(request)
-            
-        except Exception as e:
-            logger.error(f"❌ 401: Token Verification Failed: {str(e)}")
-            # If standard ID Token verification fails, ChatGPT might be sending an Access Token.
-            # For now, we return 401 so we can see the specific error in your logs.
-            return JSONResponse(status_code=401, content={"error": "Invalid Token", "details": str(e)})
+                if response.status_code != 200:
+                    logger.error(f"❌ Token Validation Failed: {response.text}")
+                    return JSONResponse(status_code=401, content={"error": "Invalid Token"})
+
+                token_data = response.json()
+                
+                # 4. Domain Check (Security)
+                # Google returns the user's email or 'hd' in the tokeninfo response
+                user_email = token_data.get("email", "")
+                
+                # IMPORTANT: Access tokens don't always include the 'hd' field. 
+                # We check the email suffix to be safe.
+                if not user_email.endswith(f"@{ALLOWED_DOMAIN}"):
+                    logger.warning(f"⛔ Blocked unauthorized domain: {user_email}")
+                    return JSONResponse(
+                        status_code=403, 
+                        content={"error": f"Access restricted to {ALLOWED_DOMAIN} users."}
+                    )
+
+                logger.info(f"✅ Access granted to {user_email}")
+                return await call_next(request)
+
+            except Exception as e:
+                logger.error(f"❌ Middleware Error: {str(e)}")
+                return JSONResponse(status_code=500, content={"error": "Internal Auth Error"})
 
 # --- 4. GOOGLE SERVICES INITIALIZATION ---
 
