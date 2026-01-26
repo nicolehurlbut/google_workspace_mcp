@@ -4,13 +4,11 @@ import logging
 import json
 import io
 import datetime
-import base64
 from fastmcp import FastMCP
 
 # Google Libraries
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
 
 # File Handlers
 from pypdf import PdfReader
@@ -66,7 +64,6 @@ try:
         logger.info("✅ Auth Success: Connected as Service Account.")
     else:
         logger.critical(f"❌ FATAL: Key file not found at {KEY_PATH}")
-        # We do NOT fail here to allow the server to start and report the error via tools
 except Exception as e:
     logger.error(f"❌ Auth Failed: {e}")
 
@@ -198,52 +195,4 @@ def read_slides(presentation_id: str):
 @server.tool()
 def read_form(form_id: str):
     """Read questions from a Google Form."""
-    if not forms_service: return "Error: No Auth."
-    try:
-        form = forms_service.forms().get(form_id=form_id).execute()
-        output = [f"Form: {form.get('info', {}).get('title')}"]
-        for item in form.get('items', []):
-            output.append(f"Q: {item.get('title')} ({item.get('questionItem', {}).get('question', {}).keys()})")
-        return "\n".join(output)
-    except Exception as e: return f"Error: {e}"
-
-# --- TOOLS: CALENDAR & PEOPLE ---
-
-@server.tool()
-def list_calendars():
-    """List available calendars (to find Holidays/Shared calendars)."""
-    if not calendar_service: return "Error: No Auth."
-    try:
-        res = calendar_service.calendarList().list().execute()
-        return "\n".join([f"{c['summary']} (ID: {c['id']})" for c in res.get('items', [])])
-    except Exception as e: return f"Error: {e}"
-
-@server.tool()
-def list_events(calendar_id: str = 'primary', limit: int = 5):
-    """List upcoming events from a specific calendar."""
-    if not calendar_service: return "Error: No Auth."
-    try:
-        now = datetime.datetime.utcnow().isoformat() + 'Z'
-        res = calendar_service.events().list(calendarId=calendar_id, timeMin=now, maxResults=limit, singleEvents=True, orderBy='startTime').execute()
-        events = res.get('items', [])
-        return "\n".join([f"{e['start'].get('dateTime', e['start'].get('date'))}: {e.get('summary')}" for e in events])
-    except Exception as e: return f"Error: {e}"
-
-@server.tool()
-def find_person(query: str):
-    """Look up a person's contact info/title in the directory."""
-    if not people_service: return "Error: No Auth."
-    try:
-        res = people_service.people().searchDirectoryPeople(query=query, readMask="names,emailAddresses,organizations", sources=["DIRECTORY_SOURCE_TYPE_DOMAIN_CONTACT"]).execute()
-        output = []
-        for p in res.get('people', []):
-            name = p.get('names', [{}])[0].get('displayName', 'Unknown')
-            email = p.get('emailAddresses', [{}])[0].get('value', '')
-            output.append(f"{name} <{email}>")
-        return "\n".join(output) if output else "Person not found."
-    except Exception as e: return f"Error: {e}"
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    logger.info(f"🚀 Starting Ultimate Bot on 0.0.0.0:{port}")
-    server.run(transport="sse", host="0.0.0.0", port=port)
+    if not forms_service: return "Error
