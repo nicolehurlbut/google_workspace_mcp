@@ -85,11 +85,19 @@ async def oauth_well_known(request: Request):
 
 async def oauth_protected_resource(request: Request):
     """OAuth 2.0 Protected Resource Metadata (RFC 9728)"""
+    # Determine which resource path is being requested
+    path = request.url.path
+    if "/sse" in path:
+        resource = f"{PUBLIC_URL}/sse"
+    else:
+        resource = PUBLIC_URL
+    
     return JSONResponse({
-        "resource": PUBLIC_URL,
+        "resource": resource,
         "authorization_servers": [PUBLIC_URL],
         "scopes_supported": ["openid", "email", "profile"] + SCOPES,
         "bearer_methods_supported": ["header"],
+        "resource_documentation": f"{PUBLIC_URL}/",
     })
 
 
@@ -518,20 +526,37 @@ class SSEApp:
         auth = headers.get(b"authorization", b"").decode("utf-8")
         
         is_valid = False
+        user_email = None
+        
         if auth.startswith("Bearer "):
             token = auth.split(" ")[1]
             token_info = await verify_token_manual(token)
             if token_info:
                 is_valid = True
-                logger.info(f"✅ Secure SSE Access: {token_info.get('email')}")
+                user_email = token_info.get('email')
+                logger.info(f"✅ Secure SSE Access: {user_email}")
 
         if not is_valid:
+            logger.info(f"🔐 SSE request without valid token - sending auth challenge")
+            
+            # Return 401 with WWW-Authenticate header to trigger OAuth flow
+            www_auth = f'Bearer resource="{PUBLIC_URL}/sse"'
+            
             await send({
                 "type": "http.response.start",
                 "status": 401,
-                "headers": [(b"content-type", b"application/json")],
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"www-authenticate", www_auth.encode("utf-8")),
+                ],
             })
-            await send({"type": "http.response.body", "body": b'{"error": "Unauthorized"}'})
+            await send({
+                "type": "http.response.body", 
+                "body": json.dumps({
+                    "error": "unauthorized",
+                    "error_description": "Bearer token required"
+                }).encode("utf-8")
+            })
             return
 
         async with sse_transport.connect_sse(scope, receive, send) as streams:
