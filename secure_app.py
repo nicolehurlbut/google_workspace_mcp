@@ -27,16 +27,15 @@ from googleapiclient.discovery import build
 from pypdf import PdfReader
 import openpyxl
 
-# --- LOGGING ---
+# --- 1. LOGGING & CONFIG ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("google_mcp")
 
-# --- CONFIGURATION ---
 KEY_PATH = "/app/service-account.json"
 ALLOWED_DOMAIN = "yourcompany.com" # ⚠️ CHANGE THIS
 CLIENT_ID = os.environ.get("CLIENT_ID")
 CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
-PUBLIC_URL = os.environ.get("PUBLIC_URL") 
+PUBLIC_URL = os.environ.get("PUBLIC_URL")
 
 SCOPES = [
     'https://www.googleapis.com/auth/drive.readonly',
@@ -49,22 +48,19 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive.activity.readonly'
 ]
 
-# --- 1. OAUTH PROXY ENDPOINTS (ChatGPT Integration) ---
+# --- 2. OAUTH PROXY ENDPOINTS (For ChatGPT) ---
 
 async def oauth_well_known(request: Request):
-    """Tells ChatGPT where to find our Auth endpoints."""
     return JSONResponse({
         "issuer": PUBLIC_URL,
         "authorization_endpoint": f"{PUBLIC_URL}/authorize",
         "token_endpoint": f"{PUBLIC_URL}/token",
-        "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
+        "token_endpoint_auth_methods_supported": ["client_secret_post"],
         "response_types_supported": ["code"]
     })
 
 async def oauth_authorize(request: Request):
-    """Redirects the user to Google."""
     params = request.query_params
-    google_auth_url = "https://accounts.google.com/o/oauth2/auth"
     payload = {
         "client_id": CLIENT_ID,
         "redirect_uri": params.get("redirect_uri"),
@@ -74,11 +70,9 @@ async def oauth_authorize(request: Request):
         "access_type": "online",
         "prompt": "consent"
     }
-    logger.info(f"🔗 Redirecting to Google with callback: {payload['redirect_uri']}")
-    return RedirectResponse(f"{google_auth_url}?{urlencode(payload)}")
+    return RedirectResponse(f"https://accounts.google.com/o/oauth2/auth?{urlencode(payload)}")
 
 async def oauth_token(request: Request):
-    """Exchanges the code for a token (Server-to-Google)."""
     form = await request.form()
     async with httpx.AsyncClient() as client:
         resp = await client.post("https://oauth2.googleapis.com/token", data={
@@ -88,45 +82,33 @@ async def oauth_token(request: Request):
             "grant_type": "authorization_code",
             "redirect_uri": form.get("redirect_uri")
         })
-        if resp.status_code != 200:
-            logger.error(f"❌ Google Token Fail: {resp.text}")
-            return JSONResponse(status_code=400, content={"error": "Failed to get token from Google"})
-        return JSONResponse(resp.json())
+        return JSONResponse(resp.json(), status_code=resp.status_code)
 
-# --- 2. SECURITY MIDDLEWARE (The Bouncer) ---
+# --- 3. SECURITY MIDDLEWARE (Domain Gatekeeper) ---
+
 class OAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        # Allow discovery and auth endpoints to pass through
         if request.url.path in ["/", "/health", "/authorize", "/token", "/.well-known/oauth-authorization-server"]:
-             return await call_next(request)
+            return await call_next(request)
 
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
-            return JSONResponse(status_code=401, content={"error": "Missing Auth Token"})
-            
+            return JSONResponse(status_code=401, content={"error": "Missing Token"})
+
         token = auth_header.split(" ")[1]
-        
         try:
-            id_info = id_token.verify_oauth2_token(token, google_requests.Request(), clock_skew_in_seconds=10)
-            user_domain = id_info.get('hd')
-            
-            if user_domain != ALLOWED_DOMAIN:
-                logger.warning(f"⛔ Blocked external domain: {id_info.get('email')}")
+            id_info = id_token.verify_oauth2_token(token, google_requests.Request())
+            if id_info.get('hd') != ALLOWED_DOMAIN:
+                logger.warning(f"⛔ Blocked external user: {id_info.get('email')}")
                 return JSONResponse(status_code=403, content={"error": f"Must use {ALLOWED_DOMAIN}"})
-                
             return await call_next(request)
-        except ValueError:
+        except Exception:
             return JSONResponse(status_code=401, content={"error": "Invalid Token"})
 
-# --- 3. INTERNAL AUTH (Service Account) ---
-drive_service = None
-sheet_service = None
-docs_service = None
-slides_service = None
-forms_service = None
-calendar_service = None
-people_service = None
-activity_service = None
+# --- 4. GOOGLE SERVICES INITIALIZATION ---
+
+drive_service = sheet_service = docs_service = slides_service = \
+forms_service = calendar_service = people_service = activity_service = None
 
 try:
     if os.path.exists(KEY_PATH):
@@ -139,33 +121,24 @@ try:
         calendar_service = build('calendar', 'v3', credentials=creds)
         people_service = build('people', 'v1', credentials=creds)
         activity_service = build('driveactivity', 'v2', credentials=creds)
-        logger.info("✅ Service Account Connected.")
+        logger.info("✅ All Google Services Connected.")
 except Exception as e:
-    logger.error(f"❌ Auth Failed: {e}")
+    logger.error(f"❌ Service Account Auth Failed: {e}")
 
-# --- 4. TOOL DEFINITIONS (The Full Menu) ---
-def _run_drive_list(query_str: str, limit: int = 10):
-    if not drive_service: return "Error: Server not authenticated."
-    try:
-        results = drive_service.files().list(q=query_str, pageSize=limit, fields="files(id, name, mimeType, webViewLink, parents)").execute()
-        items = results.get('files', [])
-        return json.dumps(items, indent=2) if items else "No files found."
-    except Exception as e: return f"Error: {e}"
+# --- 5. TOOL DEFINITIONS & SCHEMA ---
 
 TOOLS_SCHEMA = [
-    Tool(name="search_files", description="Find files by name.", inputSchema={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}),
-    Tool(name="list_contents_of_folder", description="List files inside a folder.", inputSchema={"type": "object", "properties": {"folder_id": {"type": "string"}}, "required": ["folder_id"]}),
-    Tool(name="read_file", description="Read file content (Doc/PDF/Excel/Text).", inputSchema={"type": "object", "properties": {"file_id": {"type": "string"}}, "required": ["file_id"]}),
-    Tool(name="read_sheet_values", description="Read rows from a Google Sheet.", inputSchema={"type": "object", "properties": {"spreadsheet_id": {"type": "string"}, "range_name": {"type": "string"}}, "required": ["spreadsheet_id"]}),
-    Tool(name="read_doc_structure", description="Read Doc preserving tables/lists.", inputSchema={"type": "object", "properties": {"document_id": {"type": "string"}}, "required": ["document_id"]}),
-    Tool(name="read_slides", description="Read text from Slides.", inputSchema={"type": "object", "properties": {"presentation_id": {"type": "string"}}, "required": ["presentation_id"]}),
-    Tool(name="read_form", description="Read questions from a Form.", inputSchema={"type": "object", "properties": {"form_id": {"type": "string"}}, "required": ["form_id"]}),
-    Tool(name="list_calendars", description="List available calendars.", inputSchema={"type": "object", "properties": {}, "required": []}),
-    Tool(name="list_events", description="List calendar events.", inputSchema={"type": "object", "properties": {"calendar_id": {"type": "string"}, "limit": {"type": "integer"}}, "required": []}),
-    Tool(name="find_person", description="Find contact info.", inputSchema={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}),
-    Tool(name="list_file_history", description="See who changed a file and when.", inputSchema={"type": "object", "properties": {"file_id": {"type": "string"}}, "required": ["file_id"]}),
-    Tool(name="read_old_version", description="Read a past version of a file.", inputSchema={"type": "object", "properties": {"file_id": {"type": "string"}, "revision_id": {"type": "string"}}, "required": ["file_id", "revision_id"]}),
-    Tool(name="get_file_activity", description="See move/rename/edit history.", inputSchema={"type": "object", "properties": {"file_id": {"type": "string"}}, "required": ["file_id"]}),
+    Tool(name="search_files", description="Find files by name across Drive.", inputSchema={"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
+    Tool(name="list_folder", description="List contents of a specific folder.", inputSchema={"type":"object","properties":{"folder_id":{"type":"string"}},"required":["folder_id"]}),
+    Tool(name="read_file", description="Read text/table data from Doc, PDF, Excel, or Text.", inputSchema={"type":"object","properties":{"file_id":{"type":"string"}},"required":["file_id"]}),
+    Tool(name="read_sheet_values", description="Read specific range from Google Sheet.", inputSchema={"type":"object","properties":{"spreadsheet_id":{"type":"string"},"range":{"type":"string"}},"required":["spreadsheet_id"]}),
+    Tool(name="read_doc_structure", description="Get full document structure (tables/lists).", inputSchema={"type":"object","properties":{"document_id":{"type":"string"}},"required":["document_id"]}),
+    Tool(name="read_slides", description="Read text from all slides in a deck.", inputSchema={"type":"object","properties":{"presentation_id":{"type":"string"}},"required":["presentation_id"]}),
+    Tool(name="list_events", description="List upcoming calendar events.", inputSchema={"type":"object","properties":{"calendar_id":{"type":"string"},"limit":{"type":"integer"}},"required":[]}),
+    Tool(name="find_person", description="Search company directory for a person.", inputSchema={"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
+    Tool(name="list_file_history", description="Get revision history of a file.", inputSchema={"type":"object","properties":{"file_id":{"type":"string"}},"required":["file_id"]}),
+    Tool(name="read_old_version", description="Read content from a specific file revision.", inputSchema={"type":"object","properties":{"file_id":{"type":"string"},"revision_id":{"type":"string"}},"required":["file_id","revision_id"]}),
+    Tool(name="get_file_activity", description="See move/rename/edit logs.", inputSchema={"type":"object","properties":{"file_id":{"type":"string"}},"required":["file_id"]}),
 ]
 
 mcp_server = Server("google-workspace-mcp")
@@ -176,162 +149,98 @@ async def handle_list_tools() -> list[Tool]:
 
 @mcp_server.call_tool()
 async def handle_call_tool(name: str, arguments: dict | None) -> list[TextContent]:
-    if not arguments: arguments = {}
-    res = ""
-    
+    args = arguments or {}
     try:
-        # --- NAVIGATION ---
         if name == "search_files":
-            q = f"name contains '{arguments['query']}' and trashed = false"
-            res = _run_drive_list(q)
-        elif name == "list_contents_of_folder":
-            target = arguments.get('folder_id') or 'root'
-            q = f"'{target}' in parents and trashed = false"
-            res = _run_drive_list(q, limit=20)
+            q = f"name contains '{args['query']}' and trashed = false"
+            res = drive_service.files().list(q=q, fields="files(id, name, mimeType)").execute()
+            return [TextContent(type="text", text=json.dumps(res.get('files',[]), indent=2))]
+        
+        elif name == "list_folder":
+            q = f"'{args['folder_id']}' in parents and trashed = false"
+            res = drive_service.files().list(q=q, fields="files(id, name)").execute()
+            return [TextContent(type="text", text=json.dumps(res.get('files',[])))]
 
-        # --- READERS ---
         elif name == "read_file":
-            fid = arguments['file_id']
-            if not drive_service: res = "Error: No Auth."
+            fid = args['file_id']
+            meta = drive_service.files().get(fileId=fid).execute()
+            mime = meta.get('mimeType','')
+            if "google-apps.document" in mime:
+                content = drive_service.files().export_media(fileId=fid, mimeType='text/plain').execute().decode('utf-8')
+            elif "pdf" in mime:
+                raw = drive_service.files().get_media(fileId=fid).execute()
+                content = "\n".join([p.extract_text() for p in PdfReader(io.BytesIO(raw)).pages])
+            elif "spreadsheetml.sheet" in mime:
+                raw = drive_service.files().get_media(fileId=fid).execute()
+                wb = openpyxl.load_workbook(io.BytesIO(raw), data_only=True)
+                content = "\n".join([" | ".join([str(c) for c in r if c]) for s in wb.sheetnames for r in wb[s].iter_rows(max_row=20, values_only=True)])
             else:
-                meta = drive_service.files().get(fileId=fid).execute()
-                mime = meta.get('mimeType', '')
-                if "application/vnd.google-apps.document" in mime:
-                    res = drive_service.files().export_media(fileId=fid, mimeType='text/plain').execute().decode('utf-8')
-                elif "application/pdf" in mime:
-                    content = drive_service.files().get_media(fileId=fid).execute()
-                    reader = PdfReader(io.BytesIO(content))
-                    pages = [p.extract_text() for p in reader.pages]
-                    res = "\n".join(pages)
-                elif "spreadsheetml.sheet" in mime:
-                    content = drive_service.files().get_media(fileId=fid).execute()
-                    wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
-                    rows = []
-                    for s in wb.sheetnames:
-                        for r in wb[s].iter_rows(max_row=10, values_only=True):
-                            clean = [str(c) for c in r if c]
-                            if clean: rows.append("|".join(clean))
-                    res = "\n".join(rows)
-                else:
-                    res = drive_service.files().get_media(fileId=fid).execute().decode('utf-8')
+                content = drive_service.files().get_media(fileId=fid).execute().decode('utf-8')
+            return [TextContent(type="text", text=content)]
 
         elif name == "read_sheet_values":
-            if not sheet_service: res = "Error: No Auth."
-            else:
-                r = sheet_service.spreadsheets().values().get(spreadsheetId=arguments['spreadsheet_id'], range=arguments.get('range_name', 'A1:Z100')).execute()
-                res = json.dumps(r.get('values', []), indent=2)
+            res = sheet_service.spreadsheets().values().get(spreadsheetId=args['spreadsheet_id'], range=args.get('range','A1:Z100')).execute()
+            return [TextContent(type="text", text=json.dumps(res.get('values',[])))]
 
         elif name == "read_doc_structure":
-            if not docs_service: res = "Error: No Auth."
-            else:
-                doc = docs_service.documents().get(documentId=arguments['document_id']).execute()
-                content = doc.get('body').get('content', [])
-                out = []
-                for e in content:
-                    if 'paragraph' in e:
-                        out.append("".join([t['textRun']['content'] for t in e['paragraph']['elements'] if 'textRun' in t]))
-                    elif 'table' in e:
-                        out.append("[TABLE]")
-                        for r in e['table']['tableRows']:
-                            row_txt = []
-                            for c in r['tableCells']:
-                                cell_txt = "".join([t['textRun']['content'] for ce in c['content'] for t in ce.get('paragraph', {}).get('elements', []) if 'textRun' in t])
-                                row_txt.append(cell_txt.strip())
-                            out.append(" | ".join(row_txt))
-                res = "\n".join(out)
+            doc = docs_service.documents().get(documentId=args['document_id']).execute()
+            out = []
+            for e in doc.get('body').get('content', []):
+                if 'paragraph' in e:
+                    out.append("".join([t['textRun']['content'] for t in e['paragraph']['elements'] if 'textRun' in t]))
+            return [TextContent(type="text", text="\n".join(out))]
 
         elif name == "read_slides":
-            if not slides_service: res = "Error: No Auth."
-            else:
-                deck = slides_service.presentations().get(presentationId=arguments['presentation_id']).execute()
-                out = []
-                for s in deck.get('slides', []):
-                    for e in s.get('pageElements', []):
-                        if 'shape' in e and 'text' in e['shape']:
-                            out.append("".join([t['textRun']['content'] for t in e['shape']['text'].get('textElements', []) if 'textRun' in t]))
-                res = "\n".join(out)
-
-        elif name == "read_form":
-            if not forms_service: res = "Error: No Auth."
-            else:
-                form = forms_service.forms().get(form_id=arguments['form_id']).execute()
-                res = "\n".join([f"Q: {i.get('title')}" for i in form.get('items', [])])
-
-        # --- CALENDAR & PEOPLE ---
-        elif name == "list_calendars":
-            if not calendar_service: res = "Error: No Auth."
-            else:
-                cals = calendar_service.calendarList().list().execute().get('items', [])
-                res = "\n".join([f"{c['summary']} ({c['id']})" for c in cals])
+            deck = slides_service.presentations().get(presentationId=args['presentation_id']).execute()
+            out = ["Slide Data:"]
+            for s in deck.get('slides', []):
+                for e in s.get('pageElements', []):
+                    if 'shape' in e and 'text' in e['shape']:
+                        out.append("".join([t['textRun']['content'] for t in e['shape']['text'].get('textElements', []) if 'textRun' in t]))
+            return [TextContent(type="text", text="\n".join(out))]
 
         elif name == "list_events":
-            if not calendar_service: res = "Error: No Auth."
-            else:
-                now = datetime.datetime.utcnow().isoformat() + 'Z'
-                evs = calendar_service.events().list(calendarId=arguments.get('calendar_id', 'primary'), timeMin=now, maxResults=arguments.get('limit', 5), singleEvents=True).execute().get('items', [])
-                res = "\n".join([f"{e['start'].get('dateTime', e['start'].get('date'))}: {e.get('summary')}" for e in evs])
+            now = datetime.datetime.utcnow().isoformat() + 'Z'
+            evs = calendar_service.events().list(calendarId=args.get('calendar_id','primary'), timeMin=now, maxResults=args.get('limit',10)).execute()
+            txt = "\n".join([f"{e['start'].get('dateTime')}: {e['summary']}" for e in evs.get('items',[])])
+            return [TextContent(type="text", text=txt or "No events found.")]
 
         elif name == "find_person":
-            if not people_service: res = "Error: No Auth."
-            else:
-                ppl = people_service.people().searchDirectoryPeople(query=arguments['query'], readMask="names,emailAddresses", sources=["DIRECTORY_SOURCE_TYPE_DOMAIN_CONTACT"]).execute()
-                res = "\n".join([f"{p['names'][0]['displayName']} <{p['emailAddresses'][0]['value']}>" for p in ppl.get('people', [])])
+            res = people_service.people().searchDirectoryPeople(query=args['query'], readMask="names,emailAddresses", sources=["DIRECTORY_SOURCE_TYPE_DOMAIN_CONTACT"]).execute()
+            txt = "\n".join([f"{p['names'][0]['displayName']} <{p['emailAddresses'][0]['value']}>" for p in res.get('people', [])])
+            return [TextContent(type="text", text=txt or "Person not found.")]
 
-        # --- HISTORY & ACTIVITY ---
         elif name == "list_file_history":
-            if not drive_service: res = "Error: No Auth."
-            else:
-                revs = drive_service.revisions().list(fileId=arguments['file_id'], fields="revisions(id, modifiedTime, lastModifyingUser)").execute().get('revisions', [])
-                res = "\n".join([f"{r['modifiedTime']} - {r.get('lastModifyingUser', {}).get('displayName')} (ID: {r['id']})" for r in revs])
+            revs = drive_service.revisions().list(fileId=args['file_id'], fields="revisions(id, modifiedTime, lastModifyingUser)").execute().get('revisions', [])
+            txt = "\n".join([f"ID: {r['id']} | Time: {r['modifiedTime']} | User: {r.get('lastModifyingUser',{}).get('displayName')}" for r in revs])
+            return [TextContent(type="text", text=txt)]
 
         elif name == "read_old_version":
-            if not drive_service: res = "Error: No Auth."
-            else:
-                res = drive_service.revisions().get_media(fileId=arguments['file_id'], revisionId=arguments['revision_id']).execute().decode('utf-8')
+            txt = drive_service.revisions().get_media(fileId=args['file_id'], revisionId=args['revision_id']).execute().decode('utf-8')
+            return [TextContent(type="text", text=txt)]
 
         elif name == "get_file_activity":
-            if not activity_service: res = "Error: No Auth."
-            else:
-                acts = activity_service.activity().query(body={'item_name': f'items/{arguments["file_id"]}', 'pageSize': 10}).execute().get('activities', [])
-                res = "\n".join([f"{a['timestamp']}: {list(a['primaryActionDetail'].keys())[0]}" for a in acts])
-
-        else:
-            res = f"Tool {name} not found."
+            res = activity_service.activity().query(body={'item_name':f'items/{args["file_id"]}','pageSize':10}).execute().get('activities', [])
+            txt = "\n".join([f"{a['timestamp']}: {list(a['primaryActionDetail'].keys())[0]}" for a in res])
+            return [TextContent(type="text", text=txt or "No recent activity.")]
 
     except Exception as e:
-        res = f"Error: {e}"
-
-    return [TextContent(type="text", text=str(res))]
-
-# --- 5. APP SERVER ---
-async def oauth_token(request: Request):
-    """Exchanges the code for a token (Server-to-Google)."""
-    form = await request.form()
+        logger.error(f"Error in {name}: {e}")
+        return [TextContent(type="text", text=f"Error: {str(e)}")]
     
-    # --- DEBUG LOGGING ---
-    logger.info(f"🔍 TOKEN DEBUG - Code received: {form.get('code')[:10]}...")
-    logger.info(f"🔍 TOKEN DEBUG - Redirect URI received: {form.get('redirect_uri')}")
-    logger.info(f"🔍 TOKEN DEBUG - Client ID being used: {CLIENT_ID}")
-    # ---------------------
+    return [TextContent(type="text", text="Tool not recognized.")]
 
-    async with httpx.AsyncClient() as client:
-        # We proxy this request to Google
-        resp = await client.post("https://oauth2.googleapis.com/token", data={
-            "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
-            "code": form.get("code"),
-            "grant_type": "authorization_code",
-            "redirect_uri": form.get("redirect_uri")
-        })
-        
-        if resp.status_code != 200:
-            # Log the full error from Google to help debug
-            logger.error(f"❌ Google Token Fail: {resp.text}")
-            return JSONResponse(status_code=400, content=resp.json())
-            
-        return JSONResponse(resp.json())
+# --- 6. SERVER & TRANSPORT SETUP ---
+
+async def handle_sse(request: Request):
+    async with mcp_server.run_sse(request.scope, request.receive, request._send) as streams:
+        await streams.run()
+
+async def handle_messages(request: Request):
+    await mcp_server.run_sse_messages(request.scope, request.receive, request._send)
 
 routes = [
+    Route("/health", endpoint=lambda r: JSONResponse({"status":"ok"})),
     Route("/sse", endpoint=handle_sse),
     Route("/messages", endpoint=handle_messages, methods=["POST"]),
     Route("/.well-known/oauth-authorization-server", endpoint=oauth_well_known),
@@ -342,6 +251,5 @@ routes = [
 app = Starlette(routes=routes, middleware=[Middleware(OAuthMiddleware)])
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
