@@ -235,32 +235,34 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[TextConten
     
     return [TextContent(type="text", text="Tool not recognized.")]
 
-# --- 6. SERVER WIRING ---
+# --- 6. SERVER WIRING & ROBUST HANDLERS ---
 
-# Initialize the transport
-sse = SseServerTransport("/messages")
+# We create the transport once at the top level
+sse_transport = SseServerTransport("/messages")
 
-async def handle_sse(request: Request):
-    """Handles the SSE connection (GET)."""
-    async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
+async def handle_sse(scope, receive, send):
+    """Explicit ASGI handler for SSE to prevent NoneType errors."""
+    async with sse_transport.connect_sse(scope, receive, send) as streams:
         await mcp_server.run(
             streams[0], 
             streams[1], 
             mcp_server.create_initialization_options()
         )
 
-async def handle_messages(request: Request):
-    """Handles the tool execution messages (POST)."""
-    await sse.handle_post_message(request.scope, request.receive, request._send)
+async def handle_messages(scope, receive, send):
+    """Explicit ASGI handler for POST messages."""
+    await sse_transport.handle_post_message(scope, receive, send)
 
-# Health checks defined as formal functions (avoids lambda NoneType issues)
+# Simple Response Helpers
 async def homepage(request: Request):
-    return JSONResponse({"status": "ready", "service": "google-mcp"})
+    return JSONResponse({"status": "active", "mode": "standard_mcp"})
 
 async def healthcheck(request: Request):
     return JSONResponse({"status": "ok"})
 
-# UPDATED ROUTES LIST
+# THE FINAL ROUTES LIST
+# Using the function names directly (without Request) for SSE/Messages
+# is the standard way to handle low-level ASGI transports in Starlette.
 routes = [
     Route("/", endpoint=homepage),
     Route("/health", endpoint=healthcheck),
@@ -280,7 +282,6 @@ app = Starlette(
 
 if __name__ == "__main__":
     import uvicorn
-    # Get port from environment (Cloud Run sets this to 8080)
     port = int(os.environ.get("PORT", 8080))
-    logger.info(f"🚀 Standard MCP Server LIVE on port {port}")
+    logger.info(f"🚀 Deployment Finalizing on port {port}...")
     uvicorn.run(app, host="0.0.0.0", port=port)
