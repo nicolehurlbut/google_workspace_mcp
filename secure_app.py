@@ -1,3 +1,5 @@
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
 import os
 import sys
 import logging
@@ -20,6 +22,50 @@ logger = logging.getLogger("google_mcp")
 
 # --- 1. SETUP SERVER & AUTH ---
 server = FastMCP("google-workspace-mcp")
+
+# --- CONFIGURATION ---
+# REPLACE THIS with your actual Google Workspace domain (e.g. "acme.com")
+ALLOWED_DOMAIN = "singlefile.io" 
+
+# --- SECURITY: OAUTH DOMAIN CHECK ---
+class OAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # 1. Get the Authorization header (Bearer <token>)
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return JSONResponse(status_code=401, content={"error": "Missing Auth Token"})
+            
+        token = auth_header.split(" ")[1]
+        
+        try:
+            # 2. Ask Google: "Who does this token belong to?"
+            # We use a generic request because we just want to validate the email domain
+            id_info = id_token.verify_oauth2_token(
+                token, 
+                google_requests.Request(), 
+                clock_skew_in_seconds=10 # Allow slight clock diffs
+            )
+            
+            # 3. Check the Domain (The "HD" claim = Hosted Domain)
+            user_domain = id_info.get('hd')
+            user_email = id_info.get('email')
+            
+            if user_domain != ALLOWED_DOMAIN:
+                logger.warning(f"⛔ Blocked external user: {user_email}")
+                return JSONResponse(
+                    status_code=403, 
+                    content={"error": f"Unauthorized. You must use a {ALLOWED_DOMAIN} email."}
+                )
+                
+            # 4. Success! Log it and proceed.
+            logger.info(f"✅ access granted to: {user_email}")
+            return await call_next(request)
+            
+        except ValueError as e:
+            # Token was fake or expired
+            logger.warning(f"Invalid Token: {e}")
+            return JSONResponse(status_code=401, content={"error": "Invalid or Expired Token"})
+
 
 KEY_PATH = "/app/service-account.json"
 
