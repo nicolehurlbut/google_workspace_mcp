@@ -9,8 +9,8 @@ from urllib.parse import urlencode
 
 # Standard MCP & Starlette
 from mcp.server import Server
-from mcp.types import Tool, TextContent
 from mcp.server.sse import SseServerTransport
+from mcp.types import Tool, TextContent
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -33,7 +33,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("google_mcp")
 
 KEY_PATH = "/app/service-account.json"
-ALLOWED_DOMAIN = "singlefile.io" # ⚠️ CHANGE THIS
+ALLOWED_DOMAIN = "singlefile.io" 
 CLIENT_ID = os.environ.get("CLIENT_ID")
 CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
 PUBLIC_URL = os.environ.get("PUBLIC_URL")
@@ -49,7 +49,7 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive.activity.readonly'
 ]
 
-# --- 2. OAUTH PROXY ENDPOINTS (For ChatGPT) ---
+# --- 2. OAUTH PROXY ENDPOINTS (ChatGPT Integration) ---
 
 async def oauth_well_known(request: Request):
     return JSONResponse({
@@ -85,51 +85,32 @@ async def oauth_token(request: Request):
         })
         return JSONResponse(resp.json(), status_code=resp.status_code)
 
-# --- 3. SECURITY MIDDLEWARE (Domain Gatekeeper) ---
+# --- 3. SECURITY MIDDLEWARE (Access Token Validation) ---
 
 class OAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        # 1. Expanded list of "Safe Paths" that don't require a login token
-        # ChatGPT needs to see these to set up the connection.
-        allowed_paths = [
-            "/", 
-            "/health", 
-            "/authorize", 
-            "/token", 
-            "/.well-known/oauth-authorization-server",
-            "/.well-known/openid-configuration", # Added this
-            "/favicon.ico",                      # Added this to stop log noise
-            "/favicon.svg",                      # Added this
-            "/favicon.png"                       # Added this
-        ]
-
+        allowed_paths = ["/", "/health", "/authorize", "/token", "/.well-known/oauth-authorization-server", "/.well-known/openid-configuration"]
         if request.url.path in allowed_paths:
             return await call_next(request)
 
-        # 2. Extract the token for all other paths (like /sse or /messages)
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
-            logger.warning(f"🚫 401 Blocked: {request.url.path} (No Token)")
             return JSONResponse(status_code=401, content={"error": "Missing Token"})
         
         token = auth_header.split(" ")[1]
-
-        # 3. Verify Token via Google TokenInfo
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.get("https://oauth2.googleapis.com/tokeninfo", params={"access_token": token})
                 if response.status_code != 200:
                     return JSONResponse(status_code=401, content={"error": "Invalid Token"})
-
                 user_email = response.json().get("email", "")
                 if not user_email.endswith(f"@{ALLOWED_DOMAIN}"):
                     return JSONResponse(status_code=403, content={"error": "Unauthorized domain"})
-
                 return await call_next(request)
             except Exception as e:
                 return JSONResponse(status_code=500, content={"error": str(e)})
 
-# --- 4. GOOGLE SERVICES INITIALIZATION ---
+# --- 4. GOOGLE SERVICES ---
 
 drive_service = sheet_service = docs_service = slides_service = \
 forms_service = calendar_service = people_service = activity_service = None
@@ -149,12 +130,14 @@ try:
 except Exception as e:
     logger.error(f"❌ Service Account Auth Failed: {e}")
 
-# --- 5. TOOL DEFINITIONS & SCHEMA ---
+# --- 5. MCP SERVER & ALL TOOLS ---
+
+mcp_server = Server("google-workspace-mcp")
 
 TOOLS_SCHEMA = [
     Tool(name="search_files", description="Find files by name across Drive.", inputSchema={"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
     Tool(name="list_folder", description="List contents of a specific folder.", inputSchema={"type":"object","properties":{"folder_id":{"type":"string"}},"required":["folder_id"]}),
-    Tool(name="read_file", description="Read text/table data from Doc, PDF, Excel, or Text.", inputSchema={"type":"object","properties":{"file_id":{"type":"string"}},"required":["file_id"]}),
+    Tool(name="read_file", description="Read content from Doc, PDF, Excel, or Text.", inputSchema={"type":"object","properties":{"file_id":{"type":"string"}},"required":["file_id"]}),
     Tool(name="read_sheet_values", description="Read specific range from Google Sheet.", inputSchema={"type":"object","properties":{"spreadsheet_id":{"type":"string"},"range":{"type":"string"}},"required":["spreadsheet_id"]}),
     Tool(name="read_doc_structure", description="Get full document structure (tables/lists).", inputSchema={"type":"object","properties":{"document_id":{"type":"string"}},"required":["document_id"]}),
     Tool(name="read_slides", description="Read text from all slides in a deck.", inputSchema={"type":"object","properties":{"presentation_id":{"type":"string"}},"required":["presentation_id"]}),
@@ -164,8 +147,6 @@ TOOLS_SCHEMA = [
     Tool(name="read_old_version", description="Read content from a specific file revision.", inputSchema={"type":"object","properties":{"file_id":{"type":"string"},"revision_id":{"type":"string"}},"required":["file_id","revision_id"]}),
     Tool(name="get_file_activity", description="See move/rename/edit logs.", inputSchema={"type":"object","properties":{"file_id":{"type":"string"}},"required":["file_id"]}),
 ]
-
-mcp_server = Server("google-workspace-mcp")
 
 @mcp_server.list_tools()
 async def handle_list_tools() -> list[Tool]:
@@ -183,7 +164,7 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[TextConten
         elif name == "list_folder":
             q = f"'{args['folder_id']}' in parents and trashed = false"
             res = drive_service.files().list(q=q, fields="files(id, name)").execute()
-            return [TextContent(type="text", text=json.dumps(res.get('files',[])))]
+            return [TextContent(type="text", text=json.dumps(res.get('files',[]), indent=2))]
 
         elif name == "read_file":
             fid = args['file_id']
@@ -204,7 +185,7 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[TextConten
 
         elif name == "read_sheet_values":
             res = sheet_service.spreadsheets().values().get(spreadsheetId=args['spreadsheet_id'], range=args.get('range','A1:Z100')).execute()
-            return [TextContent(type="text", text=json.dumps(res.get('values',[])))]
+            return [TextContent(type="text", text=json.dumps(res.get('values',[]), indent=2))]
 
         elif name == "read_doc_structure":
             doc = docs_service.documents().get(documentId=args['document_id']).execute()
@@ -226,7 +207,7 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[TextConten
         elif name == "list_events":
             now = datetime.datetime.utcnow().isoformat() + 'Z'
             evs = calendar_service.events().list(calendarId=args.get('calendar_id','primary'), timeMin=now, maxResults=args.get('limit',10)).execute()
-            txt = "\n".join([f"{e['start'].get('dateTime')}: {e['summary']}" for e in evs.get('items',[])])
+            txt = "\n".join([f"{e['start'].get('dateTime', e['start'].get('date'))}: {e['summary']}" for e in evs.get('items',[])])
             return [TextContent(type="text", text=txt or "No events found.")]
 
         elif name == "find_person":
@@ -254,54 +235,29 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[TextConten
     
     return [TextContent(type="text", text="Tool not recognized.")]
 
-# --- 6. SERVER & TRANSPORT SETUP ---
+# --- 6. SERVER WIRING ---
 
-# We create the transport object once
 sse = SseServerTransport("/messages")
 
 async def handle_sse(request: Request):
-    """Handles the SSE connection (GET) and setup."""
-    # We use 'connect_sse' instead of the non-existent 'run_sse'
     async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
-        # streams[0] is the 'read' stream, streams[1] is the 'write' stream
-        await mcp_server.run(
-            streams[0], 
-            streams[1], 
-            mcp_server.create_initialization_options()
-        )
+        await mcp_server.run(streams[0], streams[1], mcp_server.create_initialization_options())
 
 async def handle_messages(request: Request):
-    """Handles the tool execution messages (POST)."""
-    # This specifically routes POST messages to the MCP session
     await sse.handle_post_message(request.scope, request.receive, request._send)
 
-# Health check logic
-async def handle_health(request: Request):
-    return JSONResponse({"status": "ok"})
-
-# The Routes list: Note that we allow both GET and POST on /sse 
-# to prevent the "405 Method Not Allowed" error.
-# UPDATED ROUTES LIST
 routes = [
-    Route("/", endpoint=lambda r: JSONResponse({"status":"ok"})),
     Route("/health", endpoint=lambda r: JSONResponse({"status":"ok"})),
     Route("/sse", endpoint=handle_sse, methods=["GET", "POST"]),
     Route("/messages", endpoint=handle_messages, methods=["POST"]),
-    # OAuth Handshake Endpoints
     Route("/.well-known/oauth-authorization-server", endpoint=oauth_well_known),
-    Route("/.well-known/openid-configuration", endpoint=oauth_well_known), # Added this
+    Route("/.well-known/openid-configuration", endpoint=oauth_well_known),
     Route("/authorize", endpoint=oauth_authorize),
     Route("/token", endpoint=oauth_token, methods=["POST"])
 ]
 
-# Create the App
-app = Starlette(
-    routes=routes, 
-    middleware=[Middleware(OAuthMiddleware)]
-)
+app = Starlette(routes=routes, middleware=[Middleware(OAuthMiddleware)])
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8080))
-    logger.info(f"🚀 Standard MCP Server LIVE on port {port}")
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
