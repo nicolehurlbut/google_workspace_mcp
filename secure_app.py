@@ -335,5 +335,10 @@ def find_person(query: str):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    logger.info(f"🚀 Starting Ultimate Bot on 0.0.0.0:{port}")
-    server.run(transport="sse", host="0.0.0.0", port=port)
+    app = server._create_starlette_app()
+    
+    # Add the OAuth Middleware
+    app.add_middleware(OAuthMiddleware)
+    
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=port)
