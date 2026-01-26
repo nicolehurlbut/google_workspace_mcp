@@ -32,7 +32,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("google_mcp")
 
 KEY_PATH = "/app/service-account.json"
-ALLOWED_DOMAIN = "yourcompany.com" # ⚠️ CHANGE THIS
+ALLOWED_DOMAIN = "singlefile.io" # ⚠️ CHANGE THIS
 CLIENT_ID = os.environ.get("CLIENT_ID")
 CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
 PUBLIC_URL = os.environ.get("PUBLIC_URL")
