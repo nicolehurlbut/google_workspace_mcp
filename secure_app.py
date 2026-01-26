@@ -237,27 +237,50 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[TextConten
 
 # --- 6. SERVER WIRING ---
 
+# Initialize the transport
 sse = SseServerTransport("/messages")
 
 async def handle_sse(request: Request):
+    """Handles the SSE connection (GET)."""
     async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
-        await mcp_server.run(streams[0], streams[1], mcp_server.create_initialization_options())
+        await mcp_server.run(
+            streams[0], 
+            streams[1], 
+            mcp_server.create_initialization_options()
+        )
 
 async def handle_messages(request: Request):
+    """Handles the tool execution messages (POST)."""
     await sse.handle_post_message(request.scope, request.receive, request._send)
 
+# Health checks defined as formal functions (avoids lambda NoneType issues)
+async def homepage(request: Request):
+    return JSONResponse({"status": "ready", "service": "google-mcp"})
+
+async def healthcheck(request: Request):
+    return JSONResponse({"status": "ok"})
+
+# UPDATED ROUTES LIST
 routes = [
-    Route("/health", endpoint=lambda r: JSONResponse({"status":"ok"})),
+    Route("/", endpoint=homepage),
+    Route("/health", endpoint=healthcheck),
     Route("/sse", endpoint=handle_sse, methods=["GET", "POST"]),
     Route("/messages", endpoint=handle_messages, methods=["POST"]),
+    # OAuth Handshake Endpoints
     Route("/.well-known/oauth-authorization-server", endpoint=oauth_well_known),
     Route("/.well-known/openid-configuration", endpoint=oauth_well_known),
     Route("/authorize", endpoint=oauth_authorize),
     Route("/token", endpoint=oauth_token, methods=["POST"])
 ]
 
-app = Starlette(routes=routes, middleware=[Middleware(OAuthMiddleware)])
+app = Starlette(
+    routes=routes, 
+    middleware=[Middleware(OAuthMiddleware)]
+)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    # Get port from environment (Cloud Run sets this to 8080)
+    port = int(os.environ.get("PORT", 8080))
+    logger.info(f"🚀 Standard MCP Server LIVE on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
