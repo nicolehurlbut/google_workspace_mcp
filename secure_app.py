@@ -85,7 +85,7 @@ async def oauth_token(request: Request):
         })
         return JSONResponse(resp.json(), status_code=resp.status_code)
 
-# --- 3. SECURITY MIDDLEWARE (Access Token Validation) ---
+# --- 3. SECURITY MIDDLEWARE (Resilient Version) ---
 
 class OAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -102,13 +102,21 @@ class OAuthMiddleware(BaseHTTPMiddleware):
             try:
                 response = await client.get("https://oauth2.googleapis.com/tokeninfo", params={"access_token": token})
                 if response.status_code != 200:
+                    logger.error(f"❌ Tokeninfo failed: {response.text}")
                     return JSONResponse(status_code=401, content={"error": "Invalid Token"})
-                user_email = response.json().get("email", "")
+                
+                data = response.json()
+                user_email = data.get("email", "")
+                
+                # Flexible domain check
                 if not user_email.endswith(f"@{ALLOWED_DOMAIN}"):
+                    logger.warning(f"⛔ Domain mismatch: {user_email} vs {ALLOWED_DOMAIN}")
                     return JSONResponse(status_code=403, content={"error": "Unauthorized domain"})
+                
                 return await call_next(request)
             except Exception as e:
-                return JSONResponse(status_code=500, content={"error": str(e)})
+                logger.error(f"💥 Middleware Crash: {str(e)}")
+                return JSONResponse(status_code=500, content={"error": "Internal Auth Error"})
 
 # --- 4. GOOGLE SERVICES ---
 
@@ -237,39 +245,43 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[TextConten
 
 from starlette.endpoints import HTTPEndpoint
 
-# --- 6. SERVER WIRING (Final Corrected Version) ---
+## --- 6. SERVER WIRING (With Error Logging) ---
 
 sse_transport = SseServerTransport("/messages")
 
 class SSEHandler(HTTPEndpoint):
     async def get(self, request: Request):
-        # This handles the GET /sse connection
-        async with sse_transport.connect_sse(request.scope, request.receive, request._send) as streams:
-            await mcp_server.run(
-                streams[0], 
-                streams[1], 
-                mcp_server.create_initialization_options()
-            )
+        try:
+            async with sse_transport.connect_sse(request.scope, request.receive, request._send) as streams:
+                await mcp_server.run(
+                    streams[0], 
+                    streams[1], 
+                    mcp_server.create_initialization_options()
+                )
+        except Exception as e:
+            logger.error(f"💥 SSE GET Crash: {str(e)}")
+            # We can't return a JSONResponse here because the SSE stream is already open/active
+            raise e
 
     async def post(self, request: Request):
-        # This handles the POST /sse connection (sometimes used by ChatGPT)
-        async with sse_transport.connect_sse(request.scope, request.receive, request._send) as streams:
-            await mcp_server.run(
-                streams[0], 
-                streams[1], 
-                mcp_server.create_initialization_options()
-            )
+        try:
+            async with sse_transport.connect_sse(request.scope, request.receive, request._send) as streams:
+                await mcp_server.run(
+                    streams[0], 
+                    streams[1], 
+                    mcp_server.create_initialization_options()
+                )
+        except Exception as e:
+            logger.error(f"💥 SSE POST Crash: {str(e)}")
+            raise e
 
 class MessageHandler(HTTPEndpoint):
     async def post(self, request: Request):
-        await sse_transport.handle_post_message(request.scope, request.receive, request._send)
-
-# Simple Response Helpers
-async def homepage(request: Request):
-    return JSONResponse({"status": "active", "mode": "mcp_endpoint"})
-
-async def healthcheck(request: Request):
-    return JSONResponse({"status": "ok"})
+        try:
+            await sse_transport.handle_post_message(request.scope, request.receive, request._send)
+        except Exception as e:
+            logger.error(f"💥 Message POST Crash: {str(e)}")
+            return JSONResponse(status_code=500, content={"error": str(e)})
 
 # THE FINAL ROUTES LIST
 routes = [
