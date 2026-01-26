@@ -4,18 +4,18 @@ import logging
 import json
 import io
 import datetime
+import httpx
+from urllib.parse import urlencode
 
-# --- 1. LIBRARIES ---
-# Standard MCP & Starlette (No FastMCP wrapper)
+# Standard MCP & Starlette
 from mcp.server import Server
-from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource
-import mcp.types as types
+from mcp.types import Tool, TextContent
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Route
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, RedirectResponse
 
 # Google & Auth
 from google.oauth2 import service_account
@@ -31,9 +31,12 @@ import openpyxl
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("google_mcp")
 
-# --- 2. CONFIGURATION ---
+# --- CONFIGURATION ---
 KEY_PATH = "/app/service-account.json"
-ALLOWED_DOMAIN = "yourcompany.com"  # ⚠️ REPLACE WITH YOUR DOMAIN
+ALLOWED_DOMAIN = "yourcompany.com" # ⚠️ CHANGE THIS
+CLIENT_ID = os.environ.get("CLIENT_ID")
+CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
+PUBLIC_URL = os.environ.get("PUBLIC_URL") 
 
 SCOPES = [
     'https://www.googleapis.com/auth/drive.readonly',
@@ -46,11 +49,55 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive.activity.readonly'
 ]
 
-# --- 3. SECURITY MIDDLEWARE (The Bouncer) ---
+# --- 1. OAUTH PROXY ENDPOINTS (ChatGPT Integration) ---
+
+async def oauth_well_known(request: Request):
+    """Tells ChatGPT where to find our Auth endpoints."""
+    return JSONResponse({
+        "issuer": PUBLIC_URL,
+        "authorization_endpoint": f"{PUBLIC_URL}/authorize",
+        "token_endpoint": f"{PUBLIC_URL}/token",
+        "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
+        "response_types_supported": ["code"]
+    })
+
+async def oauth_authorize(request: Request):
+    """Redirects the user to Google."""
+    params = request.query_params
+    google_auth_url = "https://accounts.google.com/o/oauth2/auth"
+    payload = {
+        "client_id": CLIENT_ID,
+        "redirect_uri": params.get("redirect_uri"),
+        "response_type": "code",
+        "scope": "openid email",
+        "state": params.get("state"),
+        "access_type": "online",
+        "prompt": "consent"
+    }
+    logger.info(f"🔗 Redirecting to Google with callback: {payload['redirect_uri']}")
+    return RedirectResponse(f"{google_auth_url}?{urlencode(payload)}")
+
+async def oauth_token(request: Request):
+    """Exchanges the code for a token (Server-to-Google)."""
+    form = await request.form()
+    async with httpx.AsyncClient() as client:
+        resp = await client.post("https://oauth2.googleapis.com/token", data={
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "code": form.get("code"),
+            "grant_type": "authorization_code",
+            "redirect_uri": form.get("redirect_uri")
+        })
+        if resp.status_code != 200:
+            logger.error(f"❌ Google Token Fail: {resp.text}")
+            return JSONResponse(status_code=400, content={"error": "Failed to get token from Google"})
+        return JSONResponse(resp.json())
+
+# --- 2. SECURITY MIDDLEWARE (The Bouncer) ---
 class OAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        # Allow health checks and tool POSTs (connection validation happens at SSE)
-        if request.url.path in ["/", "/health", "/messages"]:
+        # Allow discovery and auth endpoints to pass through
+        if request.url.path in ["/", "/health", "/authorize", "/token", "/.well-known/oauth-authorization-server"]:
              return await call_next(request)
 
         auth_header = request.headers.get("Authorization", "")
@@ -60,32 +107,18 @@ class OAuthMiddleware(BaseHTTPMiddleware):
         token = auth_header.split(" ")[1]
         
         try:
-            # Verify Google Token
-            id_info = id_token.verify_oauth2_token(
-                token, 
-                google_requests.Request(), 
-                clock_skew_in_seconds=10
-            )
-            
+            id_info = id_token.verify_oauth2_token(token, google_requests.Request(), clock_skew_in_seconds=10)
             user_domain = id_info.get('hd')
-            user_email = id_info.get('email')
             
-            if not user_domain:
-                logger.warning(f"⛔ Blocked public gmail: {user_email}")
-                return JSONResponse(status_code=403, content={"error": "Public Gmail not allowed."})
-
             if user_domain != ALLOWED_DOMAIN:
-                logger.warning(f"⛔ Blocked external domain: {user_email}")
+                logger.warning(f"⛔ Blocked external domain: {id_info.get('email')}")
                 return JSONResponse(status_code=403, content={"error": f"Must use {ALLOWED_DOMAIN}"})
                 
-            logger.info(f"✅ Access granted: {user_email}")
             return await call_next(request)
-            
-        except ValueError as e:
-            logger.warning(f"Invalid Token: {e}")
+        except ValueError:
             return JSONResponse(status_code=401, content={"error": "Invalid Token"})
 
-# --- 4. INTERNAL AUTH (Service Account) ---
+# --- 3. INTERNAL AUTH (Service Account) ---
 drive_service = None
 sheet_service = None
 docs_service = None
@@ -107,24 +140,17 @@ try:
         people_service = build('people', 'v1', credentials=creds)
         activity_service = build('driveactivity', 'v2', credentials=creds)
         logger.info("✅ Service Account Connected.")
-    else:
-        logger.critical(f"❌ Key file missing: {KEY_PATH}")
 except Exception as e:
     logger.error(f"❌ Auth Failed: {e}")
 
-# --- 5. HELPER FUNCTIONS ---
+# --- 4. TOOL DEFINITIONS (The Full Menu) ---
 def _run_drive_list(query_str: str, limit: int = 10):
     if not drive_service: return "Error: Server not authenticated."
     try:
-        results = drive_service.files().list(
-            q=query_str, pageSize=limit, fields="files(id, name, mimeType, webViewLink, parents)"
-        ).execute()
+        results = drive_service.files().list(q=query_str, pageSize=limit, fields="files(id, name, mimeType, webViewLink, parents)").execute()
         items = results.get('files', [])
         return json.dumps(items, indent=2) if items else "No files found."
     except Exception as e: return f"Error: {e}"
-
-# --- 6. TOOL DEFINITIONS (The "Menu") ---
-# Since we dropped FastMCP, we define the schemas manually.
 
 TOOLS_SCHEMA = [
     Tool(name="search_files", description="Find files by name.", inputSchema={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}),
@@ -141,8 +167,6 @@ TOOLS_SCHEMA = [
     Tool(name="read_old_version", description="Read a past version of a file.", inputSchema={"type": "object", "properties": {"file_id": {"type": "string"}, "revision_id": {"type": "string"}}, "required": ["file_id", "revision_id"]}),
     Tool(name="get_file_activity", description="See move/rename/edit history.", inputSchema={"type": "object", "properties": {"file_id": {"type": "string"}}, "required": ["file_id"]}),
 ]
-
-# --- 7. SERVER SETUP & HANDLERS ---
 
 mcp_server = Server("google-workspace-mcp")
 
@@ -167,7 +191,6 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[TextConten
 
         # --- READERS ---
         elif name == "read_file":
-            # Implementation
             fid = arguments['file_id']
             if not drive_service: res = "Error: No Auth."
             else:
@@ -202,7 +225,6 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[TextConten
             if not docs_service: res = "Error: No Auth."
             else:
                 doc = docs_service.documents().get(documentId=arguments['document_id']).execute()
-                # Simplified parser for brevity
                 content = doc.get('body').get('content', [])
                 out = []
                 for e in content:
@@ -281,8 +303,7 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[TextConten
 
     return [TextContent(type="text", text=str(res))]
 
-# --- 8. ASGI SERVER WIRING ---
-
+# --- 5. APP SERVER ---
 async def handle_sse(request: Request):
     async with mcp_server.run_sse(request.scope, request.receive, request._send) as streams:
         await streams.run()
@@ -292,16 +313,15 @@ async def handle_messages(request: Request):
 
 routes = [
     Route("/sse", endpoint=handle_sse),
-    Route("/messages", endpoint=handle_messages, methods=["POST"])
+    Route("/messages", endpoint=handle_messages, methods=["POST"]),
+    Route("/.well-known/oauth-authorization-server", endpoint=oauth_well_known),
+    Route("/authorize", endpoint=oauth_authorize),
+    Route("/token", endpoint=oauth_token, methods=["POST"])
 ]
 
-app = Starlette(
-    routes=routes,
-    middleware=[Middleware(OAuthMiddleware)]
-)
+app = Starlette(routes=routes, middleware=[Middleware(OAuthMiddleware)])
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     import uvicorn
-    logger.info(f"🚀 Starting Standard MCP Server on :{port}")
     uvicorn.run(app, host="0.0.0.0", port=port)

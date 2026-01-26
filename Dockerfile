@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir \
     google-auth \
     google-api-python-client \
     uvicorn \
+    httpx \
     starlette \
     pypdf \
     openpyxl  
