@@ -3,6 +3,7 @@ import sys
 import logging
 import json
 import io
+import openpyxl 
 from pypdf import PdfReader
 from fastmcp import FastMCP
 from google.oauth2 import service_account
@@ -126,6 +127,27 @@ def read_file(file_id: str):
                 text.append(page.extract_text())
                 
             return "\n".join(text)
+
+        # NEW: Handle Excel
+         if mime_type == 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
+        request = drive_service.files().get_media(fileId=file_id)
+        file_content = request.execute()
+        
+        # Load into openpyxl
+        wb = openpyxl.load_workbook(filename=io.BytesIO(file_content), data_only=True)
+        
+        output = []
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            output.append(f"--- Sheet: {sheet_name} ---")
+            # Read first 20 rows to avoid massive output
+            for row in ws.iter_rows(max_row=20, values_only=True):
+                # Filter out None values
+                clean_row = [str(cell) for cell in row if cell is not None]
+                if clean_row:
+                    output.append(" | ".join(clean_row))
+                    
+        return "\n".join(output)
 
         # 4. Handle Regular Text/Code Files (Download directly)
         else:
@@ -262,7 +284,7 @@ def read_doc_structure(document_id: str):
     except Exception as e:
         return f"Error reading doc structure: {e}"
 
- @server.tool()
+@server.tool()
 def read_form_structure(form_id: str):
     """
     Read the questions and options from a Google Form.
@@ -297,6 +319,124 @@ def read_form_structure(form_id: str):
         return "\n".join(output)
     except Exception as e:
         return f"Error reading form: {e}"
+
+@server.tool()
+def list_contents_of_folder(folder_id: str = None):
+    """
+    Explore a specific folder. 
+    Use this to navigate through sub-folders.
+    Args:
+        folder_id: The ID of the folder to look inside. 
+                   If None, looks at the Root of the drive.
+    """
+    if not drive_service: return "Error: No Auth."
+    
+    # "root" tells Drive to look at the top level
+    target_id = folder_id if folder_id else 'root'
+    
+    try:
+        # The magic query: "'parent_id' in parents"
+        q = f"'{target_id}' in parents and trashed = false"
+        
+        results = drive_service.files().list(
+            q=q, 
+            pageSize=20, 
+            # We ask for 'mimeType' so the bot knows which items are folders
+            fields="files(id, name, mimeType, webViewLink)"
+        ).execute()
+        
+        items = results.get('files', [])
+        
+        # Helper to make the output readable
+        output = [f"--- Contents of folder: {target_id} ---"]
+        for item in items:
+            type_icon = "📁" if "folder" in item['mimeType'] else "📄"
+            output.append(f"{type_icon} {item['name']} (ID: {item['id']})")
+            
+        return "\n".join(output) if items else "This folder is empty."
+    except Exception as e:
+        return f"Error listing folder: {e}"
+
+# --- NEW TOOL: TIME MACHINE ---
+@server.tool()
+def list_file_history(file_id: str):
+    """
+    See the history of a file (who changed it and when).
+    Returns a list of Revision IDs you can use to read old versions.
+    """
+    if not drive_service: return "Error: No Auth."
+    try:
+        # Request revisions
+        revisions = drive_service.revisions().list(
+            fileId=file_id, fields="revisions(id, modifiedTime, lastModifyingUser)"
+        ).execute()
+        
+        items = revisions.get('revisions', [])
+        output = []
+        for rev in items:
+            user = rev.get('lastModifyingUser', {}).get('displayName', 'Unknown')
+            time = rev.get('modifiedTime')
+            rev_id = rev.get('id')
+            output.append(f"Time: {time} | User: {user} | ID: {rev_id}")
+            
+        return "\n".join(output)
+    except Exception as e:
+        return f"Error listing history: {e}"
+
+@server.tool()
+def read_old_version(file_id: str, revision_id: str):
+    """Read the text content of a file as it existed in the past."""
+    if not drive_service: return "Error: No Auth."
+    try:
+        # We download the specific revision
+        request = drive_service.revisions().get_media(
+            fileId=file_id, revisionId=revision_id
+        )
+        content = request.execute()
+        return content.decode('utf-8')
+    except Exception as e:
+        return f"Error reading old version: {e}"
+
+@server.tool()
+def get_file_activity(file_id: str):
+    """
+    See RECENT ACTIONS on a file (Move, Rename, Edit, Permission Change).
+    This is different from 'revisions' because it shows WHO did it and WHAT type of action.
+    """
+    # Requires 'driveactivity' service
+    service = build('driveactivity', 'v2', credentials=creds)
+    
+    try:
+        # Query for the specific file
+        request = {'item_name': f'items/{file_id}', 'pageSize': 10}
+        response = service.activity().query(body=request).execute()
+        
+        activities = response.get('activities', [])
+        output = []
+        
+        for activity in activities:
+            # 1. Get Timestamp
+            time = activity.get('timestamp', 'Unknown Time')
+            
+            # 2. Get Actor (Who did it?)
+            actors = activity.get('actors', [])
+            if actors and 'user' in actors[0]:
+                user = actors[0]['user'].get('knownUser', {}).get('personName', 'Unknown User')
+            else:
+                user = "System/Anonymous"
+                
+            # 3. Get Action (What did they do?)
+            # Actions are keys like 'edit', 'move', 'rename'
+            action_type = "Unknown Action"
+            primary_action = activity.get('primaryActionDetail', {})
+            if primary_action:
+                action_type = list(primary_action.keys())[0] # e.g. 'edit' or 'move'
+            
+            output.append(f"[{time}] {user} performed: {action_type.upper()}")
+            
+        return "\n".join(output)
+    except Exception as e:
+        return f"Error getting activity: {e}"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))

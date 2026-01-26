@@ -16,7 +16,8 @@ RUN pip install --no-cache-dir \
     google-api-python-client \
     uvicorn \
     starlette \
-    pypdf
+    pypdf \
+    openpyxl  
 
 # 4. Copy remaining files
 COPY . .
