@@ -17,6 +17,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Route
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
+from starlette.endpoints import HTTPEndpoint
 
 # Google & Auth
 from google.oauth2 import service_account
@@ -49,7 +50,7 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive.activity.readonly'
 ]
 
-# --- 2. OAUTH PROXY ENDPOINTS (ChatGPT Integration) ---
+# --- 2. OAUTH PROXY ENDPOINTS ---
 
 async def oauth_well_known(request: Request):
     return JSONResponse({
@@ -85,12 +86,17 @@ async def oauth_token(request: Request):
         })
         return JSONResponse(resp.json(), status_code=resp.status_code)
 
-# --- 3. SECURITY MIDDLEWARE (Resilient Version) ---
+# --- 3. SECURITY MIDDLEWARE (With SSE Bypass) ---
 
 class OAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        allowed_paths = ["/", "/health", "/authorize", "/token", "/.well-known/oauth-authorization-server", "/.well-known/openid-configuration"]
-        if request.url.path in allowed_paths:
+        # BYPASS: These paths handle their own auth or are public discovery files
+        bypass_paths = [
+            "/", "/health", "/authorize", "/token", "/sse", "/messages",
+            "/.well-known/oauth-authorization-server", 
+            "/.well-known/openid-configuration"
+        ]
+        if request.url.path in bypass_paths:
             return await call_next(request)
 
         auth_header = request.headers.get("Authorization", "")
@@ -102,15 +108,10 @@ class OAuthMiddleware(BaseHTTPMiddleware):
             try:
                 response = await client.get("https://oauth2.googleapis.com/tokeninfo", params={"access_token": token})
                 if response.status_code != 200:
-                    logger.error(f"❌ Tokeninfo failed: {response.text}")
                     return JSONResponse(status_code=401, content={"error": "Invalid Token"})
                 
-                data = response.json()
-                user_email = data.get("email", "")
-                
-                # Flexible domain check
+                user_email = response.json().get("email", "")
                 if not user_email.endswith(f"@{ALLOWED_DOMAIN}"):
-                    logger.warning(f"⛔ Domain mismatch: {user_email} vs {ALLOWED_DOMAIN}")
                     return JSONResponse(status_code=403, content={"error": "Unauthorized domain"})
                 
                 return await call_next(request)
@@ -245,63 +246,76 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[TextConten
 
 from starlette.endpoints import HTTPEndpoint
 
-## --- 6. SERVER WIRING (With Error Logging) ---
+# --- 6. SECURE HANDLERS & ENDPOINTS ---
+
+async def verify_token_manual(request: Request):
+    """Bypasses middleware to verify the token manually for SSE streams to prevent TaskGroup crashes."""
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return False
+    
+    token = auth_header.split(" ")[1]
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get("https://oauth2.googleapis.com/tokeninfo", params={"access_token": token})
+            if resp.status_code != 200: return False
+            email = resp.json().get("email", "")
+            return email.endswith(f"@{ALLOWED_DOMAIN}")
+        except:
+            return False
 
 sse_transport = SseServerTransport("/messages")
 
 class SSEHandler(HTTPEndpoint):
     async def get(self, request: Request):
+        if not await verify_token_manual(request):
+            return JSONResponse(status_code=401, content={"error": "Unauthorized"})
         try:
             async with sse_transport.connect_sse(request.scope, request.receive, request._send) as streams:
-                await mcp_server.run(
-                    streams[0], 
-                    streams[1], 
-                    mcp_server.create_initialization_options()
-                )
+                await mcp_server.run(streams[0], streams[1], mcp_server.create_initialization_options())
         except Exception as e:
             logger.error(f"💥 SSE GET Crash: {str(e)}")
-            # We can't return a JSONResponse here because the SSE stream is already open/active
-            raise e
 
     async def post(self, request: Request):
+        if not await verify_token_manual(request):
+            return JSONResponse(status_code=401, content={"error": "Unauthorized"})
         try:
             async with sse_transport.connect_sse(request.scope, request.receive, request._send) as streams:
-                await mcp_server.run(
-                    streams[0], 
-                    streams[1], 
-                    mcp_server.create_initialization_options()
-                )
+                await mcp_server.run(streams[0], streams[1], mcp_server.create_initialization_options())
         except Exception as e:
             logger.error(f"💥 SSE POST Crash: {str(e)}")
-            raise e
 
 class MessageHandler(HTTPEndpoint):
     async def post(self, request: Request):
+        if not await verify_token_manual(request):
+            return JSONResponse(status_code=401, content={"error": "Unauthorized"})
         try:
             await sse_transport.handle_post_message(request.scope, request.receive, request._send)
         except Exception as e:
             logger.error(f"💥 Message POST Crash: {str(e)}")
             return JSONResponse(status_code=500, content={"error": str(e)})
 
-# THE FINAL ROUTES LIST
+async def homepage(request: Request):
+    return JSONResponse({"status": "active", "mode": "mcp_endpoint"})
+
+async def healthcheck(request: Request):
+    return JSONResponse({"status": "ok"})
+
 routes = [
     Route("/", endpoint=homepage),
     Route("/health", endpoint=healthcheck),
-    Route("/sse", endpoint=SSEHandler), # Now using the Class
-    Route("/messages", endpoint=MessageHandler), # Now using the Class
+    Route("/sse", endpoint=SSEHandler),
+    Route("/messages", endpoint=MessageHandler),
     Route("/.well-known/oauth-authorization-server", endpoint=oauth_well_known),
     Route("/.well-known/openid-configuration", endpoint=oauth_well_known),
     Route("/authorize", endpoint=oauth_authorize),
     Route("/token", endpoint=oauth_token, methods=["POST"])
 ]
 
-app = Starlette(
-    routes=routes, 
-    middleware=[Middleware(OAuthMiddleware)]
-)
+app = Starlette(routes=routes, middleware=[Middleware(OAuthMiddleware)])
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
-    logger.info(f"🚀 Server re-aligning on port {port}...")
+    logger.info(f"🚀 Server fixed and live on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
