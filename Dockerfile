@@ -9,16 +9,16 @@ RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 COPY secure_app.py /server/secure_app.py
 
 # 3. INSTALL DEPENDENCIES
-# Added 'pypdf' to the list
 RUN pip install --no-cache-dir \
-    mcp \
+    "mcp>=1.0.0" \
     google-auth \
     google-api-python-client \
     uvicorn \
     httpx \
     starlette \
     pypdf \
-    openpyxl  
+    openpyxl \
+    redis
 
 # 4. Copy remaining files
 COPY . .

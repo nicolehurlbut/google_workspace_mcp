@@ -382,3 +382,4 @@ wrapt==1.17.3
     # via opentelemetry-instrumentation
 zipp==3.23.0
     # via importlib-metadata
+redis>=5.0.0
