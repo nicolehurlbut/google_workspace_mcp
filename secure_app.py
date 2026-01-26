@@ -304,12 +304,32 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[TextConten
     return [TextContent(type="text", text=str(res))]
 
 # --- 5. APP SERVER ---
-async def handle_sse(request: Request):
-    async with mcp_server.run_sse(request.scope, request.receive, request._send) as streams:
-        await streams.run()
+async def oauth_token(request: Request):
+    """Exchanges the code for a token (Server-to-Google)."""
+    form = await request.form()
+    
+    # --- DEBUG LOGGING ---
+    logger.info(f"🔍 TOKEN DEBUG - Code received: {form.get('code')[:10]}...")
+    logger.info(f"🔍 TOKEN DEBUG - Redirect URI received: {form.get('redirect_uri')}")
+    logger.info(f"🔍 TOKEN DEBUG - Client ID being used: {CLIENT_ID}")
+    # ---------------------
 
-async def handle_messages(request: Request):
-    await mcp_server.run_sse_messages(request.scope, request.receive, request._send)
+    async with httpx.AsyncClient() as client:
+        # We proxy this request to Google
+        resp = await client.post("https://oauth2.googleapis.com/token", data={
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "code": form.get("code"),
+            "grant_type": "authorization_code",
+            "redirect_uri": form.get("redirect_uri")
+        })
+        
+        if resp.status_code != 200:
+            # Log the full error from Google to help debug
+            logger.error(f"❌ Google Token Fail: {resp.text}")
+            return JSONResponse(status_code=400, content=resp.json())
+            
+        return JSONResponse(resp.json())
 
 routes = [
     Route("/sse", endpoint=handle_sse),
