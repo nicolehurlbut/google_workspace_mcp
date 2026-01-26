@@ -262,24 +262,49 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[TextConten
 
 # --- 6. SERVER & TRANSPORT SETUP ---
 
+# We create the transport object once
+sse = SseServerTransport("/messages")
+
 async def handle_sse(request: Request):
-    async with mcp_server.run_sse(request.scope, request.receive, request._send) as streams:
-        await streams.run()
+    """Handles the SSE connection (GET) and setup."""
+    # We use 'connect_sse' instead of the non-existent 'run_sse'
+    async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
+        # streams[0] is the 'read' stream, streams[1] is the 'write' stream
+        await mcp_server.run(
+            streams[0], 
+            streams[1], 
+            mcp_server.create_initialization_options()
+        )
 
 async def handle_messages(request: Request):
-    await mcp_server.run_sse_messages(request.scope, request.receive, request._send)
+    """Handles the tool execution messages (POST)."""
+    # This specifically routes POST messages to the MCP session
+    await sse.handle_post_message(request.scope, request.receive, request._send)
 
+# Health check logic
+async def handle_health(request: Request):
+    return JSONResponse({"status": "ok"})
+
+# The Routes list: Note that we allow both GET and POST on /sse 
+# to prevent the "405 Method Not Allowed" error.
 routes = [
-    Route("/health", endpoint=lambda r: JSONResponse({"status":"ok"})),
-    Route("/sse", endpoint=handle_sse),
+    Route("/", endpoint=handle_health),
+    Route("/health", endpoint=handle_health),
+    Route("/sse", endpoint=handle_sse, methods=["GET", "POST"]), 
     Route("/messages", endpoint=handle_messages, methods=["POST"]),
     Route("/.well-known/oauth-authorization-server", endpoint=oauth_well_known),
     Route("/authorize", endpoint=oauth_authorize),
     Route("/token", endpoint=oauth_token, methods=["POST"])
 ]
 
-app = Starlette(routes=routes, middleware=[Middleware(OAuthMiddleware)])
+# Create the App
+app = Starlette(
+    routes=routes, 
+    middleware=[Middleware(OAuthMiddleware)]
+)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    port = int(os.environ.get("PORT", 8080))
+    logger.info(f"🚀 Standard MCP Server LIVE on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
