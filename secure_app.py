@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 # Standard MCP & Starlette
 from mcp.server import Server
 from mcp.types import Tool, TextContent
+from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
