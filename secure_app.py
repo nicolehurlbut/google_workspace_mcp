@@ -235,40 +235,48 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[TextConten
     
     return [TextContent(type="text", text="Tool not recognized.")]
 
-# --- 6. SERVER WIRING & ROBUST HANDLERS ---
+from starlette.endpoints import HTTPEndpoint
 
-# We create the transport once at the top level
+# --- 6. SERVER WIRING (Final Corrected Version) ---
+
 sse_transport = SseServerTransport("/messages")
 
-async def handle_sse(scope, receive, send):
-    """Explicit ASGI handler for SSE to prevent NoneType errors."""
-    async with sse_transport.connect_sse(scope, receive, send) as streams:
-        await mcp_server.run(
-            streams[0], 
-            streams[1], 
-            mcp_server.create_initialization_options()
-        )
+class SSEHandler(HTTPEndpoint):
+    async def get(self, request: Request):
+        # This handles the GET /sse connection
+        async with sse_transport.connect_sse(request.scope, request.receive, request._send) as streams:
+            await mcp_server.run(
+                streams[0], 
+                streams[1], 
+                mcp_server.create_initialization_options()
+            )
 
-async def handle_messages(scope, receive, send):
-    """Explicit ASGI handler for POST messages."""
-    await sse_transport.handle_post_message(scope, receive, send)
+    async def post(self, request: Request):
+        # This handles the POST /sse connection (sometimes used by ChatGPT)
+        async with sse_transport.connect_sse(request.scope, request.receive, request._send) as streams:
+            await mcp_server.run(
+                streams[0], 
+                streams[1], 
+                mcp_server.create_initialization_options()
+            )
+
+class MessageHandler(HTTPEndpoint):
+    async def post(self, request: Request):
+        await sse_transport.handle_post_message(request.scope, request.receive, request._send)
 
 # Simple Response Helpers
 async def homepage(request: Request):
-    return JSONResponse({"status": "active", "mode": "standard_mcp"})
+    return JSONResponse({"status": "active", "mode": "mcp_endpoint"})
 
 async def healthcheck(request: Request):
     return JSONResponse({"status": "ok"})
 
 # THE FINAL ROUTES LIST
-# Using the function names directly (without Request) for SSE/Messages
-# is the standard way to handle low-level ASGI transports in Starlette.
 routes = [
     Route("/", endpoint=homepage),
     Route("/health", endpoint=healthcheck),
-    Route("/sse", endpoint=handle_sse, methods=["GET", "POST"]),
-    Route("/messages", endpoint=handle_messages, methods=["POST"]),
-    # OAuth Handshake Endpoints
+    Route("/sse", endpoint=SSEHandler), # Now using the Class
+    Route("/messages", endpoint=MessageHandler), # Now using the Class
     Route("/.well-known/oauth-authorization-server", endpoint=oauth_well_known),
     Route("/.well-known/openid-configuration", endpoint=oauth_well_known),
     Route("/authorize", endpoint=oauth_authorize),
@@ -283,5 +291,5 @@ app = Starlette(
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
-    logger.info(f"🚀 Deployment Finalizing on port {port}...")
+    logger.info(f"🚀 Server re-aligning on port {port}...")
     uvicorn.run(app, host="0.0.0.0", port=port)
