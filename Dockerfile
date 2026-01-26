@@ -11,7 +11,7 @@ COPY secure_app.py /server/secure_app.py
 # 3. INSTALL DEPENDENCIES
 # Added 'pypdf' to the list
 RUN pip install --no-cache-dir \
-    fastmcp \
+    mcp \
     google-auth \
     google-api-python-client \
     uvicorn \
