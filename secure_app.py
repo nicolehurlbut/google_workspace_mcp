@@ -89,52 +89,45 @@ async def oauth_token(request: Request):
 
 class OAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        # 1. Allow Auth/Health endpoints to pass
-        if request.url.path in ["/", "/health", "/authorize", "/token", "/.well-known/oauth-authorization-server"]:
+        # 1. Expanded list of "Safe Paths" that don't require a login token
+        # ChatGPT needs to see these to set up the connection.
+        allowed_paths = [
+            "/", 
+            "/health", 
+            "/authorize", 
+            "/token", 
+            "/.well-known/oauth-authorization-server",
+            "/.well-known/openid-configuration", # Added this
+            "/favicon.ico",                      # Added this to stop log noise
+            "/favicon.svg",                      # Added this
+            "/favicon.png"                       # Added this
+        ]
+
+        if request.url.path in allowed_paths:
             return await call_next(request)
 
-        # 2. Extract the token
+        # 2. Extract the token for all other paths (like /sse or /messages)
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
+            logger.warning(f"🚫 401 Blocked: {request.url.path} (No Token)")
             return JSONResponse(status_code=401, content={"error": "Missing Token"})
         
         token = auth_header.split(" ")[1]
 
-        # 3. Verify the token with Google's TokenInfo API
-        # This works for BOTH 'ya29' Access Tokens and ID Tokens
+        # 3. Verify Token via Google TokenInfo
         async with httpx.AsyncClient() as client:
             try:
-                # We call Google's validation endpoint
-                response = await client.get(
-                    "https://oauth2.googleapis.com/tokeninfo",
-                    params={"access_token": token}
-                )
-                
+                response = await client.get("https://oauth2.googleapis.com/tokeninfo", params={"access_token": token})
                 if response.status_code != 200:
-                    logger.error(f"❌ Token Validation Failed: {response.text}")
                     return JSONResponse(status_code=401, content={"error": "Invalid Token"})
 
-                token_data = response.json()
-                
-                # 4. Domain Check (Security)
-                # Google returns the user's email or 'hd' in the tokeninfo response
-                user_email = token_data.get("email", "")
-                
-                # IMPORTANT: Access tokens don't always include the 'hd' field. 
-                # We check the email suffix to be safe.
+                user_email = response.json().get("email", "")
                 if not user_email.endswith(f"@{ALLOWED_DOMAIN}"):
-                    logger.warning(f"⛔ Blocked unauthorized domain: {user_email}")
-                    return JSONResponse(
-                        status_code=403, 
-                        content={"error": f"Access restricted to {ALLOWED_DOMAIN} users."}
-                    )
+                    return JSONResponse(status_code=403, content={"error": "Unauthorized domain"})
 
-                logger.info(f"✅ Access granted to {user_email}")
                 return await call_next(request)
-
             except Exception as e:
-                logger.error(f"❌ Middleware Error: {str(e)}")
-                return JSONResponse(status_code=500, content={"error": "Internal Auth Error"})
+                return JSONResponse(status_code=500, content={"error": str(e)})
 
 # --- 4. GOOGLE SERVICES INITIALIZATION ---
 
@@ -288,12 +281,15 @@ async def handle_health(request: Request):
 
 # The Routes list: Note that we allow both GET and POST on /sse 
 # to prevent the "405 Method Not Allowed" error.
+# UPDATED ROUTES LIST
 routes = [
-    Route("/", endpoint=handle_health),
-    Route("/health", endpoint=handle_health),
-    Route("/sse", endpoint=handle_sse, methods=["GET", "POST"]), 
+    Route("/", endpoint=lambda r: JSONResponse({"status":"ok"})),
+    Route("/health", endpoint=lambda r: JSONResponse({"status":"ok"})),
+    Route("/sse", endpoint=handle_sse, methods=["GET", "POST"]),
     Route("/messages", endpoint=handle_messages, methods=["POST"]),
+    # OAuth Handshake Endpoints
     Route("/.well-known/oauth-authorization-server", endpoint=oauth_well_known),
+    Route("/.well-known/openid-configuration", endpoint=oauth_well_known), # Added this
     Route("/authorize", endpoint=oauth_authorize),
     Route("/token", endpoint=oauth_token, methods=["POST"])
 ]
