@@ -325,9 +325,15 @@ def find_person(query: str):
 # --- STARTUP WITH OAUTH GATEKEEPER ---
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    app = server._create_starlette_app()
+    
+    # 1. Get the ASGI app from FastMCP (Official Public Method)
+    # This creates the Starlette app properly
+    app = server.create_asgi_app()
+    
+    # 2. Add the Security Middleware to the app
     app.add_middleware(OAuthMiddleware)
     
+    # 3. Run using Uvicorn directly
     import uvicorn
     logger.info(f"🚀 Starting Secure OAuth-Gatekept Bot on 0.0.0.0:{port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
