@@ -30,7 +30,6 @@ server = FastMCP("google-workspace-mcp")
 
 KEY_PATH = "/app/service-account.json"
 
-# Internal Service Account Scopes (The Bot's Power)
 SCOPES = [
     'https://www.googleapis.com/auth/drive.readonly',
     'https://www.googleapis.com/auth/spreadsheets.readonly',
@@ -43,44 +42,37 @@ SCOPES = [
 ]
 
 # --- SECURITY CONFIGURATION ---
+# ⚠️ CHANGE THIS to your company's domain
 ALLOWED_DOMAIN = "singlefile.io" 
 
-# --- SECURITY MIDDLEWARE (The "Gatekeeper") ---
+# --- SECURITY MIDDLEWARE ---
 class OAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        # Allow health checks or browser pings (optional)
         if request.url.path == "/" or request.url.path == "/health":
             return await call_next(request)
 
-        # 1. Get the Authorization header
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
-            # If valid, allow it to proceed to the endpoint handler (which might just fail if it's SSE)
-            # But strictly speaking, ChatGPT sends the token.
             return JSONResponse(status_code=401, content={"error": "Missing Auth Token"})
             
         token = auth_header.split(" ")[1]
         
         try:
-            # 2. Ask Google: "Who does this token belong to?"
-            # We use a generic request because we just want to validate the email domain
-            # We skip client_id check here because ChatGPT manages the client ID
+            # Verify the Google Token
             id_info = id_token.verify_oauth2_token(
                 token, 
                 google_requests.Request(), 
                 clock_skew_in_seconds=10
             )
             
-            # 3. Check the Domain ("hd" = Hosted Domain)
             user_domain = id_info.get('hd')
             user_email = id_info.get('email')
             
-            # 3a. If user has no domain (gmail.com), 'hd' is None
+            # Check Domain
             if not user_domain:
                 logger.warning(f"⛔ Blocked public gmail user: {user_email}")
                 return JSONResponse(status_code=403, content={"error": "Public Gmail accounts not allowed."})
 
-            # 3b. Check if it matches YOUR domain
             if user_domain != ALLOWED_DOMAIN:
                 logger.warning(f"⛔ Blocked external domain: {user_email}")
                 return JSONResponse(
@@ -88,7 +80,6 @@ class OAuthMiddleware(BaseHTTPMiddleware):
                     content={"error": f"Unauthorized. You must use a {ALLOWED_DOMAIN} email."}
                 )
                 
-            # 4. Success!
             logger.info(f"✅ Access granted to: {user_email}")
             return await call_next(request)
             
@@ -96,7 +87,7 @@ class OAuthMiddleware(BaseHTTPMiddleware):
             logger.warning(f"Invalid Token: {e}")
             return JSONResponse(status_code=401, content={"error": "Invalid or Expired Token"})
 
-# --- INTERNAL SERVICE AUTH (The Bot's Badge) ---
+# --- INTERNAL SERVICE AUTH ---
 drive_service = None
 sheet_service = None
 docs_service = None
@@ -138,7 +129,7 @@ def _run_drive_list(query_str: str, limit: int = 10):
     except Exception as e:
         return f"Error: {e}"
 
-# --- TOOLS ---
+# --- TOOLS: NAVIGATION ---
 
 @server.tool()
 def search_files(query: str):
@@ -152,6 +143,8 @@ def list_contents_of_folder(folder_id: str = None):
     target = folder_id if folder_id else 'root'
     q = f"'{target}' in parents and trashed = false"
     return _run_drive_list(q, limit=20)
+
+# --- TOOLS: READERS ---
 
 @server.tool()
 def read_file(file_id: str):
@@ -249,6 +242,55 @@ def read_form(form_id: str):
         return "\n".join(output)
     except Exception as e: return f"Error: {e}"
 
+# --- TOOLS: HISTORY & ACTIVITY (Restored) ---
+
+@server.tool()
+def list_file_history(file_id: str):
+    """See the history of a file (who changed it and when)."""
+    if not drive_service: return "Error: No Auth."
+    try:
+        revisions = drive_service.revisions().list(
+            fileId=file_id, fields="revisions(id, modifiedTime, lastModifyingUser)"
+        ).execute()
+        items = revisions.get('revisions', [])
+        output = []
+        for rev in items:
+            user = rev.get('lastModifyingUser', {}).get('displayName', 'Unknown')
+            time = rev.get('modifiedTime')
+            rev_id = rev.get('id')
+            output.append(f"Time: {time} | User: {user} | ID: {rev_id}")
+        return "\n".join(output)
+    except Exception as e: return f"Error: {e}"
+
+@server.tool()
+def read_old_version(file_id: str, revision_id: str):
+    """Read the text content of a file as it existed in the past."""
+    if not drive_service: return "Error: No Auth."
+    try:
+        req = drive_service.revisions().get_media(fileId=file_id, revisionId=revision_id)
+        return req.execute().decode('utf-8')
+    except Exception as e: return f"Error: {e}"
+
+@server.tool()
+def get_file_activity(file_id: str):
+    """See RECENT ACTIONS (Move, Rename, Edit) on a file."""
+    if not activity_service: return "Error: No Auth."
+    try:
+        request = {'item_name': f'items/{file_id}', 'pageSize': 10}
+        response = activity_service.activity().query(body=request).execute()
+        activities = response.get('activities', [])
+        output = []
+        for activity in activities:
+            time = activity.get('timestamp', 'Unknown')
+            actors = activity.get('actors', [])
+            user = actors[0]['user'].get('knownUser', {}).get('personName', 'Unknown') if actors else "System"
+            action_type = list(activity.get('primaryActionDetail', {}).keys())[0] if activity.get('primaryActionDetail') else "Unknown"
+            output.append(f"[{time}] {user}: {action_type.upper()}")
+        return "\n".join(output)
+    except Exception as e: return f"Error: {e}"
+
+# --- TOOLS: CALENDAR & PEOPLE ---
+
 @server.tool()
 def list_calendars():
     if not calendar_service: return "Error: No Auth."
@@ -283,14 +325,9 @@ def find_person(query: str):
 # --- STARTUP WITH OAUTH GATEKEEPER ---
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    
-    # 1. Create the base app
     app = server._create_starlette_app()
-    
-    # 2. Add the OAuth Middleware (The Bouncer)
     app.add_middleware(OAuthMiddleware)
     
-    # 3. Run
     import uvicorn
     logger.info(f"🚀 Starting Secure OAuth-Gatekept Bot on 0.0.0.0:{port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
