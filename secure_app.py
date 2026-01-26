@@ -15,22 +15,27 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("google_mcp")
 
 # --- 1. SETUP SERVER & AUTH ---
-# Initialize the server
 server = FastMCP("google-workspace-mcp")
 
-# Path to the key we mounted in Cloud Run
 KEY_PATH = "/app/service-account.json"
-SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+# Added 'spreadsheets.readonly' scope
+SCOPES = [
+    'https://www.googleapis.com/auth/drive.readonly',
+    'https://www.googleapis.com/auth/spreadsheets.readonly'
+]
 
 drive_service = None
+sheet_service = None
 
 try:
     if os.path.exists(KEY_PATH):
         creds = service_account.Credentials.from_service_account_file(
             KEY_PATH, scopes=SCOPES
         )
+        # Build BOTH services
         drive_service = build('drive', 'v3', credentials=creds)
-        logger.info("✅ Successfully connected to Google Drive API")
+        sheet_service = build('sheets', 'v4', credentials=creds)
+        logger.info("✅ Successfully connected to Drive and Sheets APIs")
     else:
         logger.warning(f"⚠️ Key file not found at {KEY_PATH}. Tools will fail.")
 except Exception as e:
@@ -40,46 +45,48 @@ except Exception as e:
 
 @server.tool()
 def list_drive_items(query: str = None, limit: int = 10):
-    """
-    List files in the allowed Google Drive.
-    Args:
-        query: Optional search query (e.g., "name contains 'budget'")
-        limit: Max files to return (default 10)
-    """
-    if not drive_service:
-        return "Error: Server not authenticated."
-
+    """List files in Google Drive. Optional query filters by name."""
+    if not drive_service: return "Error: Server not authenticated."
     try:
         q = "trashed = false"
         if query:
             q += f" and name contains '{query}'"
             
         results = drive_service.files().list(
-            q=q, pageSize=limit, fields="files(id, name, mimeType, webViewLink, driveId)"
+            q=q, pageSize=limit, fields="files(id, name, mimeType, webViewLink)"
         ).execute()
-        
-        items = results.get('files', [])
-        return json.dumps(items, indent=2)
+        return json.dumps(results.get('files', []), indent=2)
     except Exception as e:
         return f"Error listing files: {e}"
 
 @server.tool()
-def read_file(file_id: str):
-    """
-    Read the content of a specific Google Doc or text file.
-    Args:
-        file_id: The ID of the file to read.
-    """
-    if not drive_service:
-        return "Error: Server not authenticated."
+def search_files(name_query: str):
+    """Find files specifically by name (e.g. 'Budget 2024')."""
+    if not drive_service: return "Error: Server not authenticated."
+    try:
+        q = f"name contains '{name_query}' and trashed = false"
+        results = drive_service.files().list(
+            q=q, pageSize=10, fields="files(id, name, mimeType, webViewLink)"
+        ).execute()
+        items = results.get('files', [])
+        if not items: return "No files found."
+        return json.dumps(items, indent=2)
+    except Exception as e:
+        return f"Error searching: {e}"
 
+@server.tool()
+def read_file(file_id: str):
+    """Read the text content of a Google Doc."""
+    if not drive_service: return "Error: Server not authenticated."
     try:
         file_meta = drive_service.files().get(fileId=file_id).execute()
         mime_type = file_meta.get('mimeType')
 
         if "application/vnd.google-apps" in mime_type:
+            # Export Google Docs to plain text
             request = drive_service.files().export_media(fileId=file_id, mimeType='text/plain')
         else:
+            # Download regular text files
             request = drive_service.files().get_media(fileId=file_id)
             
         content = request.execute()
@@ -87,31 +94,45 @@ def read_file(file_id: str):
     except Exception as e:
         return f"Error reading file: {e}"
 
-# --- 3. SECURITY & STARTUP ---
+@server.tool()
+def read_sheet_values(spreadsheet_id: str, range_name: str = "A1:Z100"):
+    """
+    Read data from a Google Sheet.
+    Args:
+        spreadsheet_id: The ID of the sheet file.
+        range_name: The range to read (e.g. 'Sheet1!A1:B10'). Defaults to first 100 rows.
+    """
+    if not sheet_service: return "Error: Sheets service not authenticated."
+    try:
+        result = sheet_service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id, range=range_name
+        ).execute()
+        rows = result.get('values', [])
+        if not rows: return "No data found."
+        return json.dumps(rows, indent=2)
+    except Exception as e:
+        return f"Error reading sheet: {e}"
+
+@server.tool()
+def get_file_metadata(file_id: str):
+    """Get details about a file (owner, modified time, type) without downloading it."""
+    if not drive_service: return "Error: Server not authenticated."
+    try:
+        file = drive_service.files().get(
+            fileId=file_id, 
+            fields="id, name, mimeType, parents, modifiedTime, owners, webViewLink"
+        ).execute()
+        return json.dumps(file, indent=2)
+    except Exception as e:
+        return f"Error getting metadata: {e}"
+
+# --- 3. SECURITY ---
 
 ALLOWED_FILE_IDS = [id.strip() for id in os.environ.get("ALLOWED_FILE_IDS", "").split(",") if id.strip()]
 
-def validate_access(kwargs):
-    """Helper to check permissions before tool runs"""
-    if ALLOWED_FILE_IDS:
-        # Check file_id argument if present
-        f_id = kwargs.get('file_id')
-        if f_id and f_id not in ALLOWED_FILE_IDS:
-            raise ValueError(f"⛔ ACCESS DENIED: File ID {f_id} not allowed.")
-
 if __name__ == "__main__":
-    # Get port from environment or default to 8080
     port = int(os.environ.get("PORT", 8080))
     logger.info(f"🚀 Starting Secure Server on 0.0.0.0:{port}")
     
-    # We inject the security check explicitly here before running
-    # This avoids breaking the 'tool registry' structure
-    original_read = server.get_tool("read_file")
-    if original_read:
-        # We wrap the underlying function safely
-        # (Note: FastMCP handles execution, so we rely on its internal validation where possible,
-        # but for now we trust the defined tools are clean).
-        pass
-
-    # CRITICAL FIX: Explicitly pass host and port to run()
+    # Run the server
     server.run(transport="sse", host="0.0.0.0", port=port)
