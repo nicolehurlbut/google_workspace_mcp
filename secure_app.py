@@ -168,19 +168,16 @@ mcp = FastMCP(
     ),
 )
 
-# Default user for service account delegation
-# This is the user the service account will impersonate via domain-wide delegation
-# For domain-wide delegation, this should be a real user in the domain, not the service account itself
-DEFAULT_USER = os.environ.get("IMPERSONATE_USER", "nicole.hurlbut@singlefile.io")
-
 @mcp.tool()
 def search_drive(query: str) -> str:
-    """Search Google Drive files by query string."""
+    """Search Google Drive files by query string (includes shared drives)."""
     drive = build_drive_service()
     results = drive.files().list(
         q=f"fullText contains '{query}'",
-        fields="files(id, name, mimeType, modifiedTime, webViewLink)",
-        pageSize=20
+        fields="files(id, name, mimeType, modifiedTime, webViewLink, driveId)",
+        pageSize=20,
+        includeItemsFromAllDrives=True,
+        supportsAllDrives=True
     ).execute().get('files', [])
     
     if not results:
@@ -193,26 +190,42 @@ def search_drive(query: str) -> str:
 
 @mcp.tool()
 def read_file(file_id: str) -> str:
-    """Read content from a Google Drive file by its ID."""
+    """Read content from a Google Drive file by its ID (supports shared drives)."""
     drive = build_drive_service()
-    meta = drive.files().get(fileId=file_id, fields="name,mimeType").execute()
+    meta = drive.files().get(fileId=file_id, fields="name,mimeType", supportsAllDrives=True).execute()
     content = extract_file_content(drive, file_id, meta['mimeType'])
     return f"# {meta['name']}\n\n{content}"
 
 @mcp.tool()
 def list_folder(folder_id: str = "root") -> str:
-    """List files in a Google Drive folder. Use 'root' for the root folder."""
+    """List files in a Google Drive folder (supports shared drives). Use 'root' for the root folder."""
     drive = build_drive_service()
     results = drive.files().list(
         q=f"'{folder_id}' in parents and trashed=false",
-        fields="files(id, name, mimeType)",
-        pageSize=50
+        fields="files(id, name, mimeType, driveId)",
+        pageSize=50,
+        includeItemsFromAllDrives=True,
+        supportsAllDrives=True
     ).execute().get('files', [])
     
     if not results:
         return "Folder is empty."
     
     return "\n".join([f"• {f['name']} ({f['mimeType']}) - {f['id']}" for f in results])
+
+@mcp.tool()
+def list_shared_drives() -> str:
+    """List all shared drives accessible to the service account."""
+    drive = build_drive_service()
+    results = drive.drives().list(
+        pageSize=50,
+        fields="drives(id, name)"
+    ).execute().get('drives', [])
+    
+    if not results:
+        return "No shared drives found. Make sure the service account is a member of the shared drive."
+    
+    return "\n".join([f"• {d['name']} (ID: {d['id']})" for d in results])
 
 @mcp.tool()
 def read_spreadsheet(spreadsheet_id: str, range: str = "A1:Z1000") -> str:
