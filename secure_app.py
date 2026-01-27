@@ -433,23 +433,43 @@ sse_transport = SseServerTransport("/mcp/messages")
 
 class SSEApp:
     """
-    SSE endpoint - Mixed auth mode.
-    Allow all connections, auth is checked at the tool level.
+    SSE endpoint with token validation.
+    Requires valid Google token from @singlefile.io domain.
     """
     async def __call__(self, scope, receive, send):
-        # Extract and store auth header for tool-level checks
+        # Extract Authorization header
         headers = dict(scope.get("headers", []))
         auth_header = headers.get(b"authorization", b"").decode("utf-8")
         
-        # Store token in scope for tools to access
-        scope["auth_token"] = None
-        if auth_header.startswith("Bearer "):
-            scope["auth_token"] = auth_header.split(" ", 1)[1]
-            logger.info(f"🔍 SSE connection with token")
-        else:
-            logger.info(f"🔍 SSE connection without token (public access)")
+        logger.info(f"🔍 SSE request - Auth header present: {bool(auth_header)}")
         
-        # Allow connection - auth checked at tool level
+        # Validate token
+        is_valid = False
+        if auth_header.startswith("Bearer "):
+            token = auth_header.split(" ", 1)[1]
+            token_info = await verify_google_token(token)
+            if token_info:
+                is_valid = True
+                logger.info(f"✅ SSE connection authorized: {token_info.get('email')}")
+            else:
+                logger.warning(f"❌ Token validation failed")
+        else:
+            logger.warning(f"❌ No Bearer token provided")
+        
+        if not is_valid:
+            logger.warning("❌ SSE connection rejected: invalid or missing token")
+            await send({
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [(b"content-type", b"application/json")],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": b'{"error": "Unauthorized - valid token required"}'
+            })
+            return
+        
+        # Token valid - proceed with MCP connection
         async with sse_transport.connect_sse(scope, receive, send) as streams:
             await mcp_server.run(
                 streams[0],
