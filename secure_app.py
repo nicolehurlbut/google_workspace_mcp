@@ -497,10 +497,13 @@ async def lifespan(app: Starlette):
         yield
     logger.info("👋 MCP session manager stopped")
 
+# Configure MCP to serve at root of mount point
+mcp.settings.streamable_http_path = "/"
+
 # Create the combined app
 app = Starlette(
     routes=[
-        # MCP endpoint - Streamable HTTP at /mcp
+        # MCP endpoint - Streamable HTTP at /mcp (serves at /mcp directly, not /mcp/mcp)
         Mount("/mcp", app=mcp.streamable_http_app()),
         
         # Health check
