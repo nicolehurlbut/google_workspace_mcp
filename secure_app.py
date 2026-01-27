@@ -433,48 +433,23 @@ sse_transport = SseServerTransport("/mcp/messages")
 
 class SSEApp:
     """
-    SSE endpoint with token validation.
-    This is where we intercept and validate tokens BEFORE the MCP stream starts.
+    SSE endpoint - Mixed auth mode.
+    Allow all connections, auth is checked at the tool level.
     """
     async def __call__(self, scope, receive, send):
-        # Extract Authorization header
+        # Extract and store auth header for tool-level checks
         headers = dict(scope.get("headers", []))
         auth_header = headers.get(b"authorization", b"").decode("utf-8")
         
-        logger.info(f"🔍 SSE request - Auth header present: {bool(auth_header)}")
-        if auth_header:
-            logger.info(f"🔍 Auth header starts with 'Bearer ': {auth_header.startswith('Bearer ')}")
-            if auth_header.startswith("Bearer "):
-                token_preview = auth_header.split(" ", 1)[1][:20]
-                logger.info(f"🔍 Token preview: {token_preview}...")
-        
-        # Validate token
-        is_valid = False
+        # Store token in scope for tools to access
+        scope["auth_token"] = None
         if auth_header.startswith("Bearer "):
-            token = auth_header.split(" ", 1)[1]
-            token_info = await verify_google_token(token)
-            if token_info:
-                is_valid = True
-                logger.info(f"✅ SSE connection authorized: {token_info.get('email')}")
-            else:
-                logger.warning(f"❌ Token validation returned None")
+            scope["auth_token"] = auth_header.split(" ", 1)[1]
+            logger.info(f"🔍 SSE connection with token")
         else:
-            logger.warning(f"❌ No Bearer token in auth header: '{auth_header[:50] if auth_header else 'empty'}'")
+            logger.info(f"🔍 SSE connection without token (public access)")
         
-        if not is_valid:
-            logger.warning("❌ SSE connection rejected: invalid token")
-            await send({
-                "type": "http.response.start",
-                "status": 401,
-                "headers": [(b"content-type", b"application/json")],
-            })
-            await send({
-                "type": "http.response.body",
-                "body": b'{"error": "Unauthorized - invalid token or domain not allowed"}'
-            })
-            return
-        
-        # Token valid - proceed with MCP connection
+        # Allow connection - auth checked at tool level
         async with sse_transport.connect_sse(scope, receive, send) as streams:
             await mcp_server.run(
                 streams[0],
