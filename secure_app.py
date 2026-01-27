@@ -24,6 +24,7 @@ from contextlib import asynccontextmanager
 
 # FastMCP - the modern way
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 # Starlette for OAuth routes
 from starlette.applications import Starlette
@@ -156,9 +157,13 @@ def extract_file_content(drive_service, file_id: str, mime_type: str) -> str:
 # =============================================================================
 
 # Create FastMCP server with stateless HTTP mode for Cloud Run
+# Disable DNS rebinding protection since we're behind Cloud Run's proxy
 mcp = FastMCP(
     "Google Workspace MCP",
     stateless_http=True,
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False,  # Cloud Run handles security
+    ),
 )
 
 # Default user for service account delegation
