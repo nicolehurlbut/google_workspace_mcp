@@ -502,21 +502,21 @@ async def oauth_well_known(request: Request):
         "issuer": PUBLIC_URL,
         "authorization_endpoint": f"{PUBLIC_URL}/authorize",
         "token_endpoint": f"{PUBLIC_URL}/token",
-        "userinfo_endpoint": f"{PUBLIC_URL}/userinfo",
         "registration_endpoint": f"{PUBLIC_URL}/register",
+        "userinfo_endpoint": f"{PUBLIC_URL}/userinfo",
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": ["RS256"],
         "scopes_supported": ["openid", "email", "profile"],
-        "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic", "none"],
+        "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
         "code_challenge_methods_supported": ["S256"],
     })
 
 async def oauth_protected_resource(request: Request):
     """OAuth 2.0 Protected Resource Metadata (RFC 9728)"""
     return JSONResponse({
-        "resource": PUBLIC_URL,
+        "resource": f"{PUBLIC_URL}/",
         "authorization_servers": [PUBLIC_URL],
         "scopes_supported": ["openid", "email", "profile"],
         "bearer_methods_supported": ["header"],
@@ -707,27 +707,34 @@ async def oauth_register(request: Request):
     except:
         return JSONResponse({"error": "invalid_request"}, status_code=400)
     
+    logger.info(f"📝 DCR request: {body}")
+    
     # Generate client credentials
     client_id = secrets.token_urlsafe(24)
     client_secret = secrets.token_urlsafe(32)
     
+    redirect_uris = body.get("redirect_uris", [])
+    client_name = body.get("client_name", "Unknown")
+    
     # Store client info
     registered_clients[client_id] = {
         "client_secret": client_secret,
-        "redirect_uris": body.get("redirect_uris", []),
-        "client_name": body.get("client_name", "Unknown"),
+        "redirect_uris": redirect_uris,
+        "client_name": client_name,
         "created_at": time.time()
     }
     
-    logger.info(f"📝 Registered new client: {body.get('client_name', 'Unknown')} ({client_id})")
+    logger.info(f"✅ Registered new client: {client_name} ({client_id})")
+    logger.info(f"   Redirect URIs: {redirect_uris}")
     
     return JSONResponse({
         "client_id": client_id,
         "client_secret": client_secret,
         "client_id_issued_at": int(time.time()),
         "client_secret_expires_at": 0,  # Never expires
-        "redirect_uris": body.get("redirect_uris", []),
-        "token_endpoint_auth_method": "client_secret_post",
+        "redirect_uris": redirect_uris,
+        "client_name": client_name,
+        "token_endpoint_auth_method": "none",  # Claude uses PKCE, not client_secret
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
     }, status_code=201)
