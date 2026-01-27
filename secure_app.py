@@ -489,9 +489,9 @@ sse_transport = SseServerTransport("/mcp/messages")
 
 class SSEApp:
     """
-    SSE endpoint with token validation + session caching.
-    Requires valid Google token from @singlefile.io domain.
-    Falls back to cached session if no token provided.
+    MCP endpoint supporting both SSE (GET) and Streamable HTTP (POST) transports.
+    
+    Claude.ai uses Streamable HTTP (POST requests), while some other clients use SSE (GET).
     
     WORKAROUND: Claude.ai has a known bug where it doesn't send the OAuth token
     on MCP requests (user-agent: Claude-User). We allow these requests through
@@ -501,12 +501,13 @@ class SSEApp:
     async def __call__(self, scope, receive, send):
         # Extract headers
         headers = dict(scope.get("headers", []))
+        method = scope.get("method", "GET")
         
         auth_header = headers.get(b"authorization", b"").decode("utf-8")
         user_agent = headers.get(b"user-agent", b"").decode("utf-8")
         fingerprint = get_client_fingerprint(scope)
         
-        logger.info(f"🔍 SSE request - fingerprint: {fingerprint}")
+        logger.info(f"🔍 MCP request - {method} / - fingerprint: {fingerprint}")
         logger.info(f"   user-agent: {user_agent}")
         logger.info(f"   auth header present: {bool(auth_header)}")
         
@@ -522,14 +523,14 @@ class SSEApp:
                 email = token_info.get('email')
                 # Cache this authentication for future requests
                 cache_authenticated_user(scope, email, token)
-                logger.info(f"✅ SSE authorized via Bearer token: {email}")
+                logger.info(f"✅ MCP authorized via Bearer token: {email}")
         
         # Method 2: Fall back to cached session
         if not email:
             cached = get_cached_session(scope)
             if cached:
                 email, token = cached
-                logger.info(f"✅ SSE authorized via cached session: {email}")
+                logger.info(f"✅ MCP authorized via cached session: {email}")
         
         # Method 3: WORKAROUND for Claude.ai bug
         # Claude.ai doesn't send the OAuth token on MCP requests (known bug)
@@ -542,7 +543,7 @@ class SSEApp:
         
         # Reject if no valid auth
         if not email:
-            logger.warning("❌ SSE connection rejected: invalid or missing token")
+            logger.warning("❌ MCP connection rejected: invalid or missing token")
             await send({
                 "type": "http.response.start",
                 "status": 401,
@@ -555,18 +556,33 @@ class SSEApp:
             return
         
         # Authorized - proceed with MCP connection
-        logger.info(f"🚀 Starting MCP session for {email}")
+        logger.info(f"🚀 Starting MCP session for {email} (method: {method})")
         try:
-            async with sse_transport.connect_sse(scope, receive, send) as streams:
-                logger.info(f"📡 SSE connection established, starting MCP server run...")
-                await mcp_server.run(
-                    streams[0],
-                    streams[1],
-                    mcp_server.create_initialization_options()
-                )
-                logger.info(f"✅ MCP session completed normally")
+            if method == "GET":
+                # Traditional SSE transport
+                async with sse_transport.connect_sse(scope, receive, send) as streams:
+                    logger.info(f"📡 SSE connection established")
+                    await mcp_server.run(
+                        streams[0],
+                        streams[1],
+                        mcp_server.create_initialization_options()
+                    )
+                    logger.info(f"✅ SSE MCP session completed normally")
+            else:
+                # POST - Streamable HTTP transport (what Claude uses)
+                # For POST requests, we handle them as individual JSON-RPC messages
+                async with sse_transport.connect_sse(scope, receive, send) as streams:
+                    logger.info(f"📡 Streamable HTTP connection established")
+                    await mcp_server.run(
+                        streams[0],
+                        streams[1],
+                        mcp_server.create_initialization_options()
+                    )
+                    logger.info(f"✅ Streamable HTTP MCP session completed normally")
         except Exception as e:
             logger.error(f"❌ MCP session error: {type(e).__name__}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             raise
 
 class MessageApp:
@@ -935,10 +951,11 @@ routes = [
     Route("/info", endpoint=homepage),
     Route("/health", endpoint=health_check),
     
-    # OAuth Discovery (both paths for compatibility)
+    # OAuth Discovery (all paths for compatibility)
     Route("/.well-known/oauth-authorization-server", endpoint=oauth_well_known),
     Route("/.well-known/oauth-authorization-server/mcp", endpoint=oauth_well_known),  # ChatGPT compat
     Route("/.well-known/openid-configuration", endpoint=oauth_well_known),
+    Route("/.well-known/oauth-protected-resource", endpoint=oauth_protected_resource),  # Claude needs this!
     
     # OAuth Flow
     Route("/authorize", endpoint=oauth_authorize, methods=["GET"]),
