@@ -84,30 +84,31 @@ def cleanup_expired_states():
 # 3. GOOGLE SERVICE BUILDERS
 # =============================================================================
 
-def get_service_account_credentials(user_email: str):
+def get_service_account_credentials():
+    """Get service account credentials (no impersonation - only accesses shared resources)."""
     creds = service_account.Credentials.from_service_account_file(KEY_PATH, scopes=SCOPES)
-    return creds.with_subject(user_email)
+    return creds
 
-def build_drive_service(user_email: str):
-    return build('drive', 'v3', credentials=get_service_account_credentials(user_email))
+def build_drive_service():
+    return build('drive', 'v3', credentials=get_service_account_credentials())
 
-def build_sheets_service(user_email: str):
-    return build('sheets', 'v4', credentials=get_service_account_credentials(user_email))
+def build_sheets_service():
+    return build('sheets', 'v4', credentials=get_service_account_credentials())
 
-def build_docs_service(user_email: str):
-    return build('docs', 'v1', credentials=get_service_account_credentials(user_email))
+def build_docs_service():
+    return build('docs', 'v1', credentials=get_service_account_credentials())
 
-def build_slides_service(user_email: str):
-    return build('slides', 'v1', credentials=get_service_account_credentials(user_email))
+def build_slides_service():
+    return build('slides', 'v1', credentials=get_service_account_credentials())
 
-def build_calendar_service(user_email: str):
-    return build('calendar', 'v3', credentials=get_service_account_credentials(user_email))
+def build_calendar_service():
+    return build('calendar', 'v3', credentials=get_service_account_credentials())
 
-def build_people_service(user_email: str):
-    return build('people', 'v1', credentials=get_service_account_credentials(user_email))
+def build_people_service():
+    return build('people', 'v1', credentials=get_service_account_credentials())
 
-def build_activity_service(user_email: str):
-    return build('driveactivity', 'v2', credentials=get_service_account_credentials(user_email))
+def build_activity_service():
+    return build('driveactivity', 'v2', credentials=get_service_account_credentials())
 
 # =============================================================================
 # 4. FILE CONTENT EXTRACTION
@@ -168,12 +169,14 @@ mcp = FastMCP(
 )
 
 # Default user for service account delegation
-DEFAULT_USER = f"admin@{ALLOWED_DOMAIN}"
+# This is the user the service account will impersonate via domain-wide delegation
+# For domain-wide delegation, this should be a real user in the domain, not the service account itself
+DEFAULT_USER = os.environ.get("IMPERSONATE_USER", "nicole.hurlbut@singlefile.io")
 
 @mcp.tool()
 def search_drive(query: str) -> str:
     """Search Google Drive files by query string."""
-    drive = build_drive_service(DEFAULT_USER)
+    drive = build_drive_service()
     results = drive.files().list(
         q=f"fullText contains '{query}'",
         fields="files(id, name, mimeType, modifiedTime, webViewLink)",
@@ -191,7 +194,7 @@ def search_drive(query: str) -> str:
 @mcp.tool()
 def read_file(file_id: str) -> str:
     """Read content from a Google Drive file by its ID."""
-    drive = build_drive_service(DEFAULT_USER)
+    drive = build_drive_service()
     meta = drive.files().get(fileId=file_id, fields="name,mimeType").execute()
     content = extract_file_content(drive, file_id, meta['mimeType'])
     return f"# {meta['name']}\n\n{content}"
@@ -199,7 +202,7 @@ def read_file(file_id: str) -> str:
 @mcp.tool()
 def list_folder(folder_id: str = "root") -> str:
     """List files in a Google Drive folder. Use 'root' for the root folder."""
-    drive = build_drive_service(DEFAULT_USER)
+    drive = build_drive_service()
     results = drive.files().list(
         q=f"'{folder_id}' in parents and trashed=false",
         fields="files(id, name, mimeType)",
@@ -214,7 +217,7 @@ def list_folder(folder_id: str = "root") -> str:
 @mcp.tool()
 def read_spreadsheet(spreadsheet_id: str, range: str = "A1:Z1000") -> str:
     """Read data from a Google Spreadsheet."""
-    sheets = build_sheets_service(DEFAULT_USER)
+    sheets = build_sheets_service()
     result = sheets.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id,
         range=range
@@ -229,7 +232,7 @@ def read_spreadsheet(spreadsheet_id: str, range: str = "A1:Z1000") -> str:
 @mcp.tool()
 def read_document(document_id: str) -> str:
     """Read content from a Google Doc."""
-    docs = build_docs_service(DEFAULT_USER)
+    docs = build_docs_service()
     doc = docs.documents().get(documentId=document_id).execute()
     
     content = []
@@ -244,7 +247,7 @@ def read_document(document_id: str) -> str:
 @mcp.tool()
 def read_presentation(presentation_id: str) -> str:
     """Read content from a Google Slides presentation."""
-    slides = build_slides_service(DEFAULT_USER)
+    slides = build_slides_service()
     pres = slides.presentations().get(presentationId=presentation_id).execute()
     
     content = [f"# {pres.get('title', 'Untitled Presentation')}"]
@@ -260,23 +263,28 @@ def read_presentation(presentation_id: str) -> str:
 
 @mcp.tool()
 def list_calendars() -> str:
-    """List all calendars accessible to the user."""
-    cal = build_calendar_service(DEFAULT_USER)
+    """List all calendars accessible to the service account."""
+    cal = build_calendar_service()
     calendars = cal.calendarList().list().execute().get('items', [])
+    if not calendars:
+        return "No calendars found. Make sure calendars are shared with the service account."
     return "\n".join([f"• {c['summary']} (ID: {c['id']})" for c in calendars])
 
 @mcp.tool()
 def list_events(calendar_id: str = "primary", max_results: int = 10) -> str:
     """List upcoming events from a calendar."""
-    cal = build_calendar_service(DEFAULT_USER)
+    cal = build_calendar_service()
     now = datetime.datetime.utcnow().isoformat() + 'Z'
-    events = cal.events().list(
-        calendarId=calendar_id,
-        timeMin=now,
-        maxResults=max_results,
-        singleEvents=True,
-        orderBy='startTime'
-    ).execute().get('items', [])
+    try:
+        events = cal.events().list(
+            calendarId=calendar_id,
+            timeMin=now,
+            maxResults=max_results,
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute().get('items', [])
+    except Exception as e:
+        return f"Error accessing calendar: {e}. Make sure the calendar is shared with the service account."
     
     if not events:
         return "No upcoming events."
@@ -290,22 +298,25 @@ def list_events(calendar_id: str = "primary", max_results: int = 10) -> str:
 
 @mcp.tool()
 def find_person(query: str) -> str:
-    """Search the company directory for a person."""
-    people = build_people_service(DEFAULT_USER)
-    results = people.people().searchDirectoryPeople(
-        query=query,
-        readMask="names,emailAddresses",
-        sources=["DIRECTORY_SOURCE_TYPE_DOMAIN_CONTACT"]
-    ).execute()
-    
-    persons = results.get('people', [])
-    if not persons:
-        return "No people found."
-    
-    return "\n".join([
-        f"• {p['names'][0]['displayName']} <{p['emailAddresses'][0]['value']}>"
-        for p in persons if p.get('names') and p.get('emailAddresses')
-    ])
+    """Search the company directory for a person. Note: Requires domain-wide delegation to access directory."""
+    try:
+        people = build_people_service()
+        results = people.people().searchDirectoryPeople(
+            query=query,
+            readMask="names,emailAddresses",
+            sources=["DIRECTORY_SOURCE_TYPE_DOMAIN_CONTACT"]
+        ).execute()
+        
+        persons = results.get('people', [])
+        if not persons:
+            return "No people found."
+        
+        return "\n".join([
+            f"• {p['names'][0]['displayName']} <{p['emailAddresses'][0]['value']}>"
+            for p in persons if p.get('names') and p.get('emailAddresses')
+        ])
+    except Exception as e:
+        return f"Error searching directory: {e}. Directory search requires domain-wide delegation."
 
 # =============================================================================
 # 6. OAUTH PROXY ENDPOINTS
