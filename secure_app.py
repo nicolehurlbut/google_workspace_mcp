@@ -513,26 +513,31 @@ async def oauth_protected_resource(request: Request):
 
 async def oauth_authorize(request: Request):
     """
-    Step 1: ChatGPT/Claude redirects user here.
-    We store their state and redirect to Google.
+    Step 1: Claude/ChatGPT redirects user here.
+    We pass through to Google with THEIR redirect_uri.
     """
     cleanup_expired_states()
     
     params = request.query_params
-    chatgpt_state = params.get("state", "")
-    chatgpt_redirect = params.get("redirect_uri", "")
+    client_redirect_uri = params.get("redirect_uri", "")
+    client_state = params.get("state", "")
+    code_challenge = params.get("code_challenge", "")
+    code_challenge_method = params.get("code_challenge_method", "S256")
     
-    logger.info(f"📥 OAuth authorize request - state: {chatgpt_state[:20]}...")
+    logger.info(f"📥 OAuth authorize request - state: {client_state[:20]}...")
+    logger.info(f"   Client redirect_uri: {client_redirect_uri}")
     
-    # Generate our internal state to track this flow
+    # Store client info to restore after Google callback
     internal_state = secrets.token_urlsafe(32)
     auth_states[internal_state] = {
-        "chatgpt_state": chatgpt_state,
-        "chatgpt_redirect_uri": chatgpt_redirect,
+        "client_state": client_state,
+        "client_redirect_uri": client_redirect_uri,
+        "code_challenge": code_challenge,
+        "code_challenge_method": code_challenge_method,
         "expires": time.time() + 600  # 10 min expiry
     }
     
-    # Build Google OAuth URL
+    # Build Google OAuth URL - use OUR callback, we'll redirect to client after
     google_params = {
         "client_id": CLIENT_ID,
         "redirect_uri": f"{PUBLIC_URL}/oauth2callback",
@@ -551,7 +556,7 @@ async def oauth_authorize(request: Request):
 async def oauth_callback(request: Request):
     """
     Step 2: Google redirects user back here.
-    We exchange the code with Google, then redirect to ChatGPT/Claude.
+    We exchange the code with Google, then redirect to Claude/ChatGPT.
     """
     params = request.query_params
     code = params.get("code")
@@ -562,7 +567,7 @@ async def oauth_callback(request: Request):
         logger.error(f"❌ Google OAuth error: {error}")
         return JSONResponse({"error": error}, status_code=400)
     
-    # Retrieve stored ChatGPT info
+    # Retrieve stored client info
     stored = auth_states.pop(internal_state, None)
     if not stored:
         logger.error("❌ Invalid or expired state")
@@ -588,18 +593,20 @@ async def oauth_callback(request: Request):
         logger.info(f"✅ Got tokens from Google - keys: {list(token_data.keys())}")
         logger.info(f"   Has refresh_token: {'refresh_token' in token_data}")
     
-    # Store tokens with a new code for ChatGPT/Claude
+    # Store tokens with a new code for Claude/ChatGPT
     proxy_code = secrets.token_urlsafe(32)
     auth_states[proxy_code] = {
         "tokens": token_data,
+        "code_challenge": stored.get("code_challenge"),
+        "code_challenge_method": stored.get("code_challenge_method"),
         "expires": time.time() + 300  # 5 min expiry
     }
     
-    # Redirect back to ChatGPT/Claude with OUR code
-    callback_url = stored["chatgpt_redirect_uri"]
-    redirect_url = f"{callback_url}?code={proxy_code}&state={stored['chatgpt_state']}"
+    # Redirect back to Claude/ChatGPT with OUR code
+    client_redirect_uri = stored["client_redirect_uri"]
+    redirect_url = f"{client_redirect_uri}?code={proxy_code}&state={stored['client_state']}"
     
-    logger.info(f"🔄 Redirecting back to client")
+    logger.info(f"🔄 Redirecting back to client: {client_redirect_uri}")
     return RedirectResponse(redirect_url)
 
 async def oauth_token(request: Request):
