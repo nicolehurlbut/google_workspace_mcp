@@ -7,6 +7,7 @@ Architecture:
 - SseServerTransport for MCP communication
 - Manual OAuth proxy for ChatGPT/Claude compatibility
 - Token validation middleware for @singlefile.io domain restriction
+- Session caching for Claude's multi-request pattern
 """
 
 import os
@@ -17,8 +18,11 @@ import io
 import datetime
 import time
 import secrets
+import hashlib
+import base64
 import httpx
 from urllib.parse import urlencode
+from typing import Optional, Dict
 
 # Standard MCP SDK (NOT FastMCP)
 from mcp.server import Server
@@ -67,7 +71,50 @@ SCOPES = [
 ]
 
 # =============================================================================
-# 2. OAUTH STATE STORAGE (In-memory - use Redis for production)
+# 2. SESSION CACHE (For Claude's multi-request pattern)
+# =============================================================================
+
+# Cache stores {client_fingerprint: (email, timestamp, token)}
+_auth_cache: Dict[str, tuple[str, float, str]] = {}
+SESSION_TTL_SECONDS = 300  # 5 minutes
+
+def get_client_fingerprint(scope) -> str:
+    """Create a fingerprint from request headers to identify the client."""
+    headers = dict(scope.get("headers", []))
+    forwarded_for = headers.get(b"x-forwarded-for", b"").decode("utf-8")
+    user_agent = headers.get(b"user-agent", b"").decode("utf-8")
+    # Use hash for privacy
+    raw = f"{forwarded_for}:{user_agent}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+def cache_authenticated_user(scope, email: str, token: str):
+    """Remember that this client just authenticated."""
+    fingerprint = get_client_fingerprint(scope)
+    _auth_cache[fingerprint] = (email, time.time(), token)
+    logger.info(f"📝 Cached session for {email} (fingerprint: {fingerprint})")
+    
+    # Clean old entries
+    now = time.time()
+    expired = [k for k, (_, ts, _) in _auth_cache.items() if now - ts > SESSION_TTL_SECONDS]
+    for k in expired:
+        del _auth_cache[k]
+        logger.info(f"🗑️ Expired session cache: {k}")
+
+def get_cached_session(scope) -> Optional[tuple[str, str]]:
+    """Check if this client recently authenticated. Returns (email, token) or None."""
+    fingerprint = get_client_fingerprint(scope)
+    if fingerprint in _auth_cache:
+        email, timestamp, token = _auth_cache[fingerprint]
+        if time.time() - timestamp < SESSION_TTL_SECONDS:
+            logger.info(f"✅ Found cached session for {email} (age: {int(time.time() - timestamp)}s)")
+            return (email, token)
+        else:
+            del _auth_cache[fingerprint]
+            logger.info(f"🗑️ Session expired for {email}")
+    return None
+
+# =============================================================================
+# 3. OAUTH STATE STORAGE (In-memory - use Redis for production)
 # =============================================================================
 
 auth_states = {}  # {state_key: {data, expires}}
@@ -85,7 +132,7 @@ def cleanup_expired_states():
         authenticated_sessions.pop(k, None)
 
 # =============================================================================
-# 3. TOKEN VALIDATION (Domain Restriction)
+# 4. TOKEN VALIDATION (Domain Restriction)
 # =============================================================================
 
 async def verify_google_token(token: str) -> dict | None:
@@ -117,7 +164,7 @@ async def verify_google_token(token: str) -> dict | None:
         return None
 
 # =============================================================================
-# 4. GOOGLE SERVICE BUILDERS
+# 5. GOOGLE SERVICE BUILDERS
 # =============================================================================
 
 def get_service_account_credentials(user_email: str):
@@ -147,7 +194,7 @@ def build_activity_service(user_email: str):
     return build('driveactivity', 'v2', credentials=get_service_account_credentials(user_email))
 
 # =============================================================================
-# 5. FILE CONTENT EXTRACTION
+# 6. FILE CONTENT EXTRACTION
 # =============================================================================
 
 def extract_file_content(drive_service, file_id: str, mime_type: str) -> str:
@@ -200,7 +247,7 @@ def extract_file_content(drive_service, file_id: str, mime_type: str) -> str:
         return f"[Error extracting content: {e}]"
 
 # =============================================================================
-# 6. MCP SERVER SETUP
+# 7. MCP SERVER SETUP
 # =============================================================================
 
 mcp_server = Server("google-workspace-mcp")
@@ -431,46 +478,55 @@ async def call_tool(name: str, arguments: dict):
         return [TextContent(type="text", text=f"Error: {str(e)}")]
 
 # =============================================================================
-# 7. SSE/MCP TRANSPORT HANDLERS
+# 8. SSE/MCP TRANSPORT HANDLERS
 # =============================================================================
 
 sse_transport = SseServerTransport("/mcp/messages")
 
 class SSEApp:
     """
-    SSE endpoint with token validation.
+    SSE endpoint with token validation + session caching.
     Requires valid Google token from @singlefile.io domain.
+    Falls back to cached session if no token provided.
     """
     async def __call__(self, scope, receive, send):
         # Extract ALL headers for debugging
         headers = dict(scope.get("headers", []))
         
-        # Log all headers
-        logger.info(f"🔍 SSE request - All headers:")
-        for key, value in headers.items():
-            key_str = key.decode("utf-8") if isinstance(key, bytes) else key
-            value_str = value.decode("utf-8") if isinstance(value, bytes) else value
-            # Truncate long values
-            if len(value_str) > 50:
-                value_str = value_str[:50] + "..."
-            logger.info(f"   {key_str}: {value_str}")
-        
+        # Log key headers (not all)
         auth_header = headers.get(b"authorization", b"").decode("utf-8")
+        user_agent = headers.get(b"user-agent", b"").decode("utf-8")
+        fingerprint = get_client_fingerprint(scope)
         
-        # Validate token
-        is_valid = False
+        logger.info(f"🔍 SSE request - fingerprint: {fingerprint}")
+        logger.info(f"   user-agent: {user_agent[:50]}..." if len(user_agent) > 50 else f"   user-agent: {user_agent}")
+        logger.info(f"   auth header present: {bool(auth_header)}")
+        
+        # Try to authenticate
+        email = None
+        token = None
+        
+        # Method 1: Bearer token in header
         if auth_header.startswith("Bearer "):
             token = auth_header.split(" ", 1)[1]
             token_info = await verify_google_token(token)
             if token_info:
-                is_valid = True
-                logger.info(f"✅ SSE connection authorized: {token_info.get('email')}")
-            else:
-                logger.warning(f"❌ Token validation failed")
-        else:
-            logger.warning(f"❌ No Bearer token provided")
+                email = token_info.get('email')
+                # Cache this authentication for future requests
+                cache_authenticated_user(scope, email, token)
+                logger.info(f"✅ SSE authorized via Bearer token: {email}")
         
-        if not is_valid:
+        # Method 2: Fall back to cached session
+        if not email:
+            cached = get_cached_session(scope)
+            if cached:
+                email, token = cached
+                logger.info(f"✅ SSE authorized via cached session: {email}")
+            else:
+                logger.warning(f"❌ No Bearer token and no cached session")
+        
+        # Reject if no valid auth
+        if not email:
             logger.warning("❌ SSE connection rejected: invalid or missing token")
             await send({
                 "type": "http.response.start",
@@ -484,7 +540,7 @@ class SSEApp:
             return
         
         # Token valid - proceed with MCP connection
-        # Send headers that prevent proxy buffering of SSE
+        logger.info(f"🚀 Starting MCP session for {email}")
         async with sse_transport.connect_sse(scope, receive, send) as streams:
             await mcp_server.run(
                 streams[0],
@@ -493,12 +549,50 @@ class SSEApp:
             )
 
 class MessageApp:
-    """Handle POST messages for MCP transport"""
+    """Handle POST messages for MCP transport - also with session caching"""
     async def __call__(self, scope, receive, send):
+        headers = dict(scope.get("headers", []))
+        auth_header = headers.get(b"authorization", b"").decode("utf-8")
+        fingerprint = get_client_fingerprint(scope)
+        
+        logger.info(f"📨 POST /mcp/messages - fingerprint: {fingerprint}")
+        
+        # Try to authenticate
+        email = None
+        
+        # Method 1: Bearer token
+        if auth_header.startswith("Bearer "):
+            token = auth_header.split(" ", 1)[1]
+            token_info = await verify_google_token(token)
+            if token_info:
+                email = token_info.get('email')
+                cache_authenticated_user(scope, email, token)
+                logger.info(f"✅ Message authorized via Bearer: {email}")
+        
+        # Method 2: Cached session
+        if not email:
+            cached = get_cached_session(scope)
+            if cached:
+                email, _ = cached
+                logger.info(f"✅ Message authorized via cache: {email}")
+        
+        if not email:
+            logger.warning("❌ Message rejected: no valid auth")
+            await send({
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [(b"content-type", b"application/json")],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": b'{"error": "Unauthorized"}'
+            })
+            return
+        
         await sse_transport.handle_post_message(scope, receive, send)
 
 # =============================================================================
-# 8. OAUTH PROXY ENDPOINTS
+# 9. OAUTH PROXY ENDPOINTS
 # =============================================================================
 
 async def oauth_well_known(request: Request):
@@ -659,8 +753,6 @@ async def oauth_token(request: Request):
         
         # Verify PKCE if code_challenge was provided
         if stored.get("code_challenge") and code_verifier:
-            import hashlib
-            import base64
             # S256: BASE64URL(SHA256(code_verifier)) == code_challenge
             verifier_hash = hashlib.sha256(code_verifier.encode()).digest()
             computed_challenge = base64.urlsafe_b64encode(verifier_hash).rstrip(b'=').decode()
@@ -771,7 +863,7 @@ async def oauth_register(request: Request):
     }, status_code=201)
 
 # =============================================================================
-# 9. UTILITY ENDPOINTS
+# 10. UTILITY ENDPOINTS
 # =============================================================================
 
 async def homepage(request: Request):
@@ -797,7 +889,7 @@ async def health_check(request: Request):
     })
 
 # =============================================================================
-# 10. STARLETTE APP & ROUTING
+# 11. STARLETTE APP & ROUTING
 # =============================================================================
 
 routes = [
@@ -834,7 +926,7 @@ async def startup_event():
             logger.info(f"   {route.path} -> {methods}")
 
 # =============================================================================
-# 11. ENTRYPOINT
+# 12. ENTRYPOINT
 # =============================================================================
 
 if __name__ == "__main__":
