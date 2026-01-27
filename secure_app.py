@@ -437,11 +437,20 @@ class SSEApp:
     Requires valid Google token from @singlefile.io domain.
     """
     async def __call__(self, scope, receive, send):
-        # Extract Authorization header
+        # Extract ALL headers for debugging
         headers = dict(scope.get("headers", []))
-        auth_header = headers.get(b"authorization", b"").decode("utf-8")
         
-        logger.info(f"🔍 SSE request - Auth header present: {bool(auth_header)}")
+        # Log all headers
+        logger.info(f"🔍 SSE request - All headers:")
+        for key, value in headers.items():
+            key_str = key.decode("utf-8") if isinstance(key, bytes) else key
+            value_str = value.decode("utf-8") if isinstance(value, bytes) else value
+            # Truncate long values
+            if len(value_str) > 50:
+                value_str = value_str[:50] + "..."
+            logger.info(f"   {key_str}: {value_str}")
+        
+        auth_header = headers.get(b"authorization", b"").decode("utf-8")
         
         # Validate token
         is_valid = False
