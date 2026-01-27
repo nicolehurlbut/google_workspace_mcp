@@ -638,6 +638,7 @@ async def oauth_token(request: Request):
     
     elif grant_type == "refresh_token":
         refresh_token = form.get("refresh_token")
+        logger.info(f"📥 Refresh token request - token present: {bool(refresh_token)}")
         
         async with httpx.AsyncClient() as client:
             resp = await client.post("https://oauth2.googleapis.com/token", data={
@@ -648,11 +649,11 @@ async def oauth_token(request: Request):
             })
             
             if resp.status_code != 200:
-                logger.error(f"❌ Refresh token failed: {resp.status_code}")
+                logger.error(f"❌ Refresh token failed: {resp.status_code} - {resp.text}")
                 return JSONResponse({"error": "invalid_grant"}, status_code=400)
             
             token_data = resp.json()
-            logger.info("✅ Returning refreshed tokens")
+            logger.info(f"✅ Refresh successful - new access_token received")
             
             return JSONResponse({
                 "access_token": token_data["access_token"],
@@ -714,23 +715,18 @@ async def health_check(request: Request):
 # =============================================================================
 
 routes = [
-    # MCP/SSE Endpoints - both root and /sse for compatibility
+    # MCP/SSE Endpoints - ROOT for ChatGPT compatibility
     Route("/", endpoint=SSEApp()),
-    Route("/sse", endpoint=SSEApp()),
     Route("/mcp/messages", endpoint=MessageApp(), methods=["POST"]),
     
     # Health & Info
     Route("/info", endpoint=homepage),
     Route("/health", endpoint=health_check),
     
-    # OAuth Discovery (multiple paths for compatibility)
+    # OAuth Discovery (both paths for compatibility)
     Route("/.well-known/oauth-authorization-server", endpoint=oauth_well_known),
-    Route("/.well-known/oauth-authorization-server/sse", endpoint=oauth_well_known),
-    Route("/.well-known/oauth-authorization-server/mcp", endpoint=oauth_well_known),
+    Route("/.well-known/oauth-authorization-server/mcp", endpoint=oauth_well_known),  # ChatGPT compat
     Route("/.well-known/openid-configuration", endpoint=oauth_well_known),
-    Route("/.well-known/openid-configuration/sse", endpoint=oauth_well_known),
-    Route("/.well-known/oauth-protected-resource", endpoint=oauth_protected_resource),
-    Route("/.well-known/oauth-protected-resource/sse", endpoint=oauth_protected_resource),
     
     # OAuth Flow
     Route("/authorize", endpoint=oauth_authorize, methods=["GET"]),
