@@ -479,6 +479,7 @@ class SSEApp:
             return
         
         # Token valid - proceed with MCP connection
+        # Send headers that prevent proxy buffering of SSE
         async with sse_transport.connect_sse(scope, receive, send) as streams:
             await mcp_server.run(
                 streams[0],
