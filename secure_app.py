@@ -71,13 +71,18 @@ SCOPES = [
 # =============================================================================
 
 auth_states = {}  # {state_key: {data, expires}}
+authenticated_sessions = {}  # {session_id: {email, expires}}
 
 def cleanup_expired_states():
-    """Remove expired OAuth states"""
+    """Remove expired OAuth states and sessions"""
     now = time.time()
     expired = [k for k, v in auth_states.items() if v.get("expires", 0) < now]
     for k in expired:
         auth_states.pop(k, None)
+    
+    expired_sessions = [k for k, v in authenticated_sessions.items() if v.get("expires", 0) < now]
+    for k in expired_sessions:
+        authenticated_sessions.pop(k, None)
 
 # =============================================================================
 # 3. TOKEN VALIDATION (Domain Restriction)
@@ -530,21 +535,33 @@ async def oauth_authorize(request: Request):
     cleanup_expired_states()
     
     params = request.query_params
+    client_id = params.get("client_id", "")
     client_redirect_uri = params.get("redirect_uri", "")
     client_state = params.get("state", "")
     code_challenge = params.get("code_challenge", "")
     code_challenge_method = params.get("code_challenge_method", "S256")
+    scope = params.get("scope", "openid email profile")
     
-    logger.info(f"📥 OAuth authorize request - state: {client_state[:20]}...")
-    logger.info(f"   Client redirect_uri: {client_redirect_uri}")
+    logger.info(f"📥 OAuth authorize request")
+    logger.info(f"   client_id: {client_id[:20]}..." if client_id else "   client_id: None")
+    logger.info(f"   redirect_uri: {client_redirect_uri}")
+    logger.info(f"   state: {client_state[:20]}..." if client_state else "   state: None")
+    logger.info(f"   code_challenge: {code_challenge[:20]}..." if code_challenge else "   code_challenge: None")
+    
+    # Verify client_id if using DCR (optional - skip if not registered)
+    if client_id and client_id not in registered_clients:
+        # Allow unregistered clients for backwards compatibility
+        logger.warning(f"⚠️ Unknown client_id: {client_id[:20]}... (allowing anyway)")
     
     # Store client info to restore after Google callback
     internal_state = secrets.token_urlsafe(32)
     auth_states[internal_state] = {
+        "client_id": client_id,
         "client_state": client_state,
         "client_redirect_uri": client_redirect_uri,
         "code_challenge": code_challenge,
         "code_challenge_method": code_challenge_method,
+        "scope": scope,
         "expires": time.time() + 600  # 10 min expiry
     }
     
@@ -622,12 +639,15 @@ async def oauth_callback(request: Request):
 
 async def oauth_token(request: Request):
     """
-    Step 3: ChatGPT/Claude exchanges our code for tokens.
+    Step 3: Claude/ChatGPT exchanges our code for tokens.
+    Supports PKCE (code_verifier) for Claude.
     """
     form = await request.form()
     grant_type = form.get("grant_type")
+    code_verifier = form.get("code_verifier")  # PKCE
     
     logger.info(f"📥 Token request - grant_type: {grant_type}")
+    logger.info(f"   code_verifier present: {bool(code_verifier)}")
     
     if grant_type == "authorization_code":
         code = form.get("code")
@@ -637,9 +657,20 @@ async def oauth_token(request: Request):
             logger.error("❌ Invalid or expired code")
             return JSONResponse({"error": "invalid_grant"}, status_code=400)
         
+        # Verify PKCE if code_challenge was provided
+        if stored.get("code_challenge") and code_verifier:
+            import hashlib
+            import base64
+            # S256: BASE64URL(SHA256(code_verifier)) == code_challenge
+            verifier_hash = hashlib.sha256(code_verifier.encode()).digest()
+            computed_challenge = base64.urlsafe_b64encode(verifier_hash).rstrip(b'=').decode()
+            if computed_challenge != stored["code_challenge"]:
+                logger.error("❌ PKCE verification failed")
+                return JSONResponse({"error": "invalid_grant", "error_description": "PKCE verification failed"}, status_code=400)
+            logger.info("✅ PKCE verification passed")
+        
         token_data = stored["tokens"]
         logger.info(f"✅ Returning tokens - has refresh_token: {'refresh_token' in token_data}")
-        logger.info(f"   refresh_token value: {token_data.get('refresh_token', 'MISSING')[:20] if token_data.get('refresh_token') else 'MISSING'}...")
         
         return JSONResponse({
             "access_token": token_data["access_token"],
