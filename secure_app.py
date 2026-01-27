@@ -156,11 +156,12 @@ def extract_file_content(drive_service, file_id: str, mime_type: str) -> str:
 # 5. FASTMCP SERVER WITH TOOLS
 # =============================================================================
 
-# Create FastMCP server with stateless HTTP mode for Cloud Run
+# Create FastMCP server - use stateful mode for better connection handling
 # Disable DNS rebinding protection since we're behind Cloud Run's proxy
 mcp = FastMCP(
     "Google Workspace MCP",
-    stateless_http=True,
+    stateless_http=False,  # Stateful mode - maintains sessions
+    json_response=True,    # Return JSON instead of SSE stream
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=False,  # Cloud Run handles security
     ),
