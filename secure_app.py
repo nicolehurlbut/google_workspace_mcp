@@ -497,21 +497,18 @@ async def lifespan(app: Starlette):
         yield
     logger.info("👋 MCP session manager stopped")
 
-# Configure MCP to serve at root of mount point
-mcp.settings.streamable_http_path = "/"
+# Get the streamable HTTP app from FastMCP
+mcp_app = mcp.streamable_http_app()
 
-# Create the combined app
+# Create the combined app with MCP at root
+from starlette.routing import Route, Mount
+
 app = Starlette(
     routes=[
-        # MCP endpoint - Streamable HTTP at /mcp (serves at /mcp directly, not /mcp/mcp)
-        Mount("/mcp", app=mcp.streamable_http_app()),
-        
-        # Health check
-        Route("/health", endpoint=health_check),
-        
-        # OAuth Discovery
+        # OAuth Discovery - must come before MCP mount
         Route("/.well-known/oauth-authorization-server", endpoint=oauth_well_known),
         Route("/.well-known/oauth-protected-resource", endpoint=oauth_protected_resource),
+        Route("/.well-known/oauth-protected-resource/mcp", endpoint=oauth_protected_resource),  # Claude looks here too
         Route("/.well-known/openid-configuration", endpoint=oauth_well_known),
         
         # OAuth Flow
@@ -519,6 +516,12 @@ app = Starlette(
         Route("/oauth2callback", endpoint=oauth_callback, methods=["GET"]),
         Route("/token", endpoint=oauth_token, methods=["POST"]),
         Route("/register", endpoint=oauth_register, methods=["POST"]),
+        
+        # Health check
+        Route("/health", endpoint=health_check),
+        
+        # MCP endpoint at root - Claude expects this
+        Mount("/", app=mcp_app),
     ],
     lifespan=lifespan,
 )
