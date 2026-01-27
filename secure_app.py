@@ -79,13 +79,17 @@ _auth_cache: Dict[str, tuple[str, float, str]] = {}
 SESSION_TTL_SECONDS = 300  # 5 minutes
 
 def get_client_fingerprint(scope) -> str:
-    """Create a fingerprint from request headers to identify the client."""
+    """Create a fingerprint from request headers to identify the client.
+    
+    Note: We only use IP address because Claude's user-agent changes between
+    the OAuth flow (python-httpx) and MCP requests (Claude-User).
+    """
     headers = dict(scope.get("headers", []))
     forwarded_for = headers.get(b"x-forwarded-for", b"").decode("utf-8")
-    user_agent = headers.get(b"user-agent", b"").decode("utf-8")
-    # Use hash for privacy
-    raw = f"{forwarded_for}:{user_agent}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+    # Just use IP - user-agent is unreliable (changes between OAuth and MCP requests)
+    # Take first IP if there are multiple (proxy chain)
+    client_ip = forwarded_for.split(",")[0].strip() if forwarded_for else "unknown"
+    return hashlib.sha256(client_ip.encode()).hexdigest()[:16]
 
 def cache_authenticated_user(scope, email: str, token: str):
     """Remember that this client just authenticated."""
@@ -493,14 +497,23 @@ class SSEApp:
         # Extract ALL headers for debugging
         headers = dict(scope.get("headers", []))
         
-        # Log key headers (not all)
+        # Log ALL headers to debug what Claude-User sends
         auth_header = headers.get(b"authorization", b"").decode("utf-8")
         user_agent = headers.get(b"user-agent", b"").decode("utf-8")
         fingerprint = get_client_fingerprint(scope)
         
         logger.info(f"🔍 SSE request - fingerprint: {fingerprint}")
-        logger.info(f"   user-agent: {user_agent[:50]}..." if len(user_agent) > 50 else f"   user-agent: {user_agent}")
+        logger.info(f"   user-agent: {user_agent}")
         logger.info(f"   auth header present: {bool(auth_header)}")
+        
+        # Log ALL headers for debugging
+        logger.info(f"   === ALL HEADERS ===")
+        for key, value in headers.items():
+            key_str = key.decode("utf-8") if isinstance(key, bytes) else key
+            value_str = value.decode("utf-8") if isinstance(value, bytes) else value
+            if len(value_str) > 100:
+                value_str = value_str[:100] + "..."
+            logger.info(f"   {key_str}: {value_str}")
         
         # Try to authenticate
         email = None
