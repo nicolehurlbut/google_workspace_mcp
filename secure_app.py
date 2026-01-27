@@ -503,12 +503,13 @@ async def oauth_well_known(request: Request):
         "authorization_endpoint": f"{PUBLIC_URL}/authorize",
         "token_endpoint": f"{PUBLIC_URL}/token",
         "userinfo_endpoint": f"{PUBLIC_URL}/userinfo",
+        "registration_endpoint": f"{PUBLIC_URL}/register",
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": ["RS256"],
         "scopes_supported": ["openid", "email", "profile"],
-        "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
+        "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic", "none"],
         "code_challenge_methods_supported": ["S256"],
     })
 
@@ -696,6 +697,41 @@ async def oauth_userinfo(request: Request):
         "email_verified": token_info.get("email_verified", False),
     })
 
+# Dynamic client registration storage
+registered_clients = {}
+
+async def oauth_register(request: Request):
+    """Dynamic Client Registration (RFC 7591)"""
+    try:
+        body = await request.json()
+    except:
+        return JSONResponse({"error": "invalid_request"}, status_code=400)
+    
+    # Generate client credentials
+    client_id = secrets.token_urlsafe(24)
+    client_secret = secrets.token_urlsafe(32)
+    
+    # Store client info
+    registered_clients[client_id] = {
+        "client_secret": client_secret,
+        "redirect_uris": body.get("redirect_uris", []),
+        "client_name": body.get("client_name", "Unknown"),
+        "created_at": time.time()
+    }
+    
+    logger.info(f"📝 Registered new client: {body.get('client_name', 'Unknown')} ({client_id})")
+    
+    return JSONResponse({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "client_id_issued_at": int(time.time()),
+        "client_secret_expires_at": 0,  # Never expires
+        "redirect_uris": body.get("redirect_uris", []),
+        "token_endpoint_auth_method": "client_secret_post",
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+    }, status_code=201)
+
 # =============================================================================
 # 9. UTILITY ENDPOINTS
 # =============================================================================
@@ -745,6 +781,7 @@ routes = [
     Route("/oauth2callback", endpoint=oauth_callback, methods=["GET"]),
     Route("/token", endpoint=oauth_token, methods=["POST"]),
     Route("/userinfo", endpoint=oauth_userinfo, methods=["GET"]),
+    Route("/register", endpoint=oauth_register, methods=["POST"]),
 ]
 
 app = Starlette(routes=routes)
