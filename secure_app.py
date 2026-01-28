@@ -63,7 +63,7 @@ SCOPES = [
     'https://www.googleapis.com/auth/presentations.readonly',
     'https://www.googleapis.com/auth/forms.body.readonly',
     'https://www.googleapis.com/auth/calendar.readonly',
-    'https://www.googleapis.com/auth/directory.readonly',
+
     'https://www.googleapis.com/auth/drive.activity.readonly',
 ]
 
@@ -101,11 +101,13 @@ def build_docs_service():
 def build_slides_service():
     return build('slides', 'v1', credentials=get_service_account_credentials())
 
+def build_forms_service():
+    return build('forms', 'v1', credentials=get_service_account_credentials())
+
 def build_calendar_service():
     return build('calendar', 'v3', credentials=get_service_account_credentials())
 
-def build_people_service():
-    return build('people', 'v1', credentials=get_service_account_credentials())
+
 
 def build_activity_service():
     return build('driveactivity', 'v2', credentials=get_service_account_credentials())
@@ -157,24 +159,25 @@ def extract_file_content(drive_service, file_id: str, mime_type: str) -> str:
 # 5. FASTMCP SERVER WITH TOOLS
 # =============================================================================
 
-# Create FastMCP server - use stateful mode for better connection handling
-# Disable DNS rebinding protection since we're behind Cloud Run's proxy
 mcp = FastMCP(
     "Google Workspace MCP",
-    stateless_http=False,  # Stateful mode - maintains sessions
-    json_response=True,    # Return JSON instead of SSE stream
+    stateless_http=False,
+    json_response=True,
     transport_security=TransportSecuritySettings(
-        enable_dns_rebinding_protection=False,  # Cloud Run handles security
+        enable_dns_rebinding_protection=False,
     ),
 )
 
+# -----------------------------------------------------------------------------
+# DRIVE TOOLS
+# -----------------------------------------------------------------------------
+
 @mcp.tool()
 def search_drive(query: str) -> str:
-    """Search Google Drive files by query string (searches all shared drives automatically)."""
+    """Search Google Drive files by content (full-text search)."""
     drive = build_drive_service()
     all_results = []
     
-    # Search in My Drive and files shared with me
     my_drive_results = drive.files().list(
         q=f"fullText contains '{query}'",
         fields="files(id, name, mimeType, modifiedTime, webViewLink)",
@@ -184,12 +187,7 @@ def search_drive(query: str) -> str:
     ).execute().get('files', [])
     all_results.extend(my_drive_results)
     
-    # Search in each shared drive
-    shared_drives = drive.drives().list(
-        pageSize=50,
-        fields="drives(id, name)"
-    ).execute().get('drives', [])
-    
+    shared_drives = drive.drives().list(pageSize=50, fields="drives(id, name)").execute().get('drives', [])
     for sd in shared_drives:
         try:
             sd_results = drive.files().list(
@@ -213,10 +211,288 @@ def search_drive(query: str) -> str:
     lines = []
     for f in all_results:
         drive_label = f" [Shared Drive: {f['_drive_name']}]" if '_drive_name' in f else ""
-        lines.append(
-            f"• {f['name']} ({f['mimeType']}){drive_label}\n  ID: {f['id']}\n  Modified: {f.get('modifiedTime', 'N/A')}\n  Link: {f.get('webViewLink', 'N/A')}"
-        )
+        lines.append(f"• {f['name']} ({f['mimeType']}){drive_label}\n  ID: {f['id']}\n  Modified: {f.get('modifiedTime', 'N/A')}\n  Link: {f.get('webViewLink', 'N/A')}")
     return "\n".join(lines)
+
+@mcp.tool()
+def search_by_name(name: str) -> str:
+    """Search Google Drive files by filename only (faster than full-text search)."""
+    drive = build_drive_service()
+    all_results = []
+    
+    my_drive_results = drive.files().list(
+        q=f"name contains '{name}'",
+        fields="files(id, name, mimeType, modifiedTime, webViewLink)",
+        pageSize=20,
+        includeItemsFromAllDrives=True,
+        supportsAllDrives=True
+    ).execute().get('files', [])
+    all_results.extend(my_drive_results)
+    
+    shared_drives = drive.drives().list(pageSize=50, fields="drives(id, name)").execute().get('drives', [])
+    for sd in shared_drives:
+        try:
+            sd_results = drive.files().list(
+                q=f"name contains '{name}'",
+                driveId=sd['id'],
+                corpora="drive",
+                fields="files(id, name, mimeType, modifiedTime, webViewLink)",
+                pageSize=20,
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True
+            ).execute().get('files', [])
+            for f in sd_results:
+                f['_drive_name'] = sd['name']
+            all_results.extend(sd_results)
+        except Exception as e:
+            logger.warning(f"Error searching shared drive {sd['name']}: {e}")
+    
+    if not all_results:
+        return "No files found matching that name."
+    
+    lines = []
+    for f in all_results:
+        drive_label = f" [Shared Drive: {f['_drive_name']}]" if '_drive_name' in f else ""
+        lines.append(f"• {f['name']} ({f['mimeType']}){drive_label}\n  ID: {f['id']}\n  Modified: {f.get('modifiedTime', 'N/A')}\n  Link: {f.get('webViewLink', 'N/A')}")
+    return "\n".join(lines)
+
+@mcp.tool()
+def list_recent_files(max_results: int = 20) -> str:
+    """List recently modified files across all accessible drives."""
+    drive = build_drive_service()
+    all_results = []
+    
+    my_drive_results = drive.files().list(
+        q="trashed=false",
+        orderBy="modifiedTime desc",
+        fields="files(id, name, mimeType, modifiedTime, webViewLink)",
+        pageSize=max_results,
+        includeItemsFromAllDrives=True,
+        supportsAllDrives=True
+    ).execute().get('files', [])
+    all_results.extend(my_drive_results)
+    
+    shared_drives = drive.drives().list(pageSize=50, fields="drives(id, name)").execute().get('drives', [])
+    for sd in shared_drives:
+        try:
+            sd_results = drive.files().list(
+                q="trashed=false",
+                orderBy="modifiedTime desc",
+                driveId=sd['id'],
+                corpora="drive",
+                fields="files(id, name, mimeType, modifiedTime, webViewLink)",
+                pageSize=max_results,
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True
+            ).execute().get('files', [])
+            for f in sd_results:
+                f['_drive_name'] = sd['name']
+            all_results.extend(sd_results)
+        except Exception as e:
+            logger.warning(f"Error listing shared drive {sd['name']}: {e}")
+    
+    all_results.sort(key=lambda x: x.get('modifiedTime', ''), reverse=True)
+    all_results = all_results[:max_results]
+    
+    if not all_results:
+        return "No recent files found."
+    
+    lines = ["📅 RECENTLY MODIFIED FILES:\n"]
+    for f in all_results:
+        drive_label = f" [Shared Drive: {f['_drive_name']}]" if '_drive_name' in f else ""
+        icon = "📁" if f['mimeType'] == 'application/vnd.google-apps.folder' else "📄"
+        lines.append(f"{icon} {f['name']}{drive_label}\n   Modified: {f.get('modifiedTime', 'N/A')}\n   ID: {f['id']}")
+    return "\n".join(lines)
+
+@mcp.tool()
+def get_file_info(file_id: str) -> str:
+    """Get detailed metadata about a file including size, owner, and sharing info."""
+    drive = build_drive_service()
+    meta = drive.files().get(
+        fileId=file_id,
+        fields="id, name, mimeType, size, createdTime, modifiedTime, owners, lastModifyingUser, webViewLink, permissions",
+        supportsAllDrives=True
+    ).execute()
+    
+    lines = [f"📄 FILE INFO: {meta.get('name', 'Unknown')}\n"]
+    lines.append(f"ID: {meta.get('id')}")
+    lines.append(f"Type: {meta.get('mimeType')}")
+    if meta.get('size'):
+        size_mb = int(meta['size']) / (1024 * 1024)
+        lines.append(f"Size: {size_mb:.2f} MB ({meta['size']} bytes)")
+    lines.append(f"Created: {meta.get('createdTime', 'N/A')}")
+    lines.append(f"Modified: {meta.get('modifiedTime', 'N/A')}")
+    
+    if meta.get('owners'):
+        owners = [o.get('displayName', o.get('emailAddress', 'Unknown')) for o in meta['owners']]
+        lines.append(f"Owner(s): {', '.join(owners)}")
+    
+    if meta.get('lastModifyingUser'):
+        lmu = meta['lastModifyingUser']
+        lines.append(f"Last modified by: {lmu.get('displayName', lmu.get('emailAddress', 'Unknown'))}")
+    
+    lines.append(f"Link: {meta.get('webViewLink', 'N/A')}")
+    
+    if meta.get('permissions'):
+        lines.append("\n📤 SHARING:")
+        for p in meta['permissions']:
+            role = p.get('role', 'unknown')
+            ptype = p.get('type', 'unknown')
+            if ptype == 'user':
+                lines.append(f"  • {p.get('emailAddress', 'Unknown')} ({role})")
+            elif ptype == 'group':
+                lines.append(f"  • Group: {p.get('emailAddress', 'Unknown')} ({role})")
+            elif ptype == 'domain':
+                lines.append(f"  • Domain: {p.get('domain', 'Unknown')} ({role})")
+            elif ptype == 'anyone':
+                lines.append(f"  • Anyone with link ({role})")
+    
+    return "\n".join(lines)
+
+@mcp.tool()
+def get_sharing_permissions(file_id: str) -> str:
+    """Get detailed sharing permissions for a file."""
+    drive = build_drive_service()
+    permissions = drive.permissions().list(
+        fileId=file_id,
+        fields="permissions(id, type, role, emailAddress, domain, displayName, expirationTime)",
+        supportsAllDrives=True
+    ).execute().get('permissions', [])
+    
+    if not permissions:
+        return "No sharing permissions found (file may be private)."
+    
+    lines = ["📤 SHARING PERMISSIONS:\n"]
+    for p in permissions:
+        role = p.get('role', 'unknown')
+        ptype = p.get('type', 'unknown')
+        expiry = f" (expires: {p['expirationTime']})" if p.get('expirationTime') else ""
+        
+        if ptype == 'user':
+            name = p.get('displayName', p.get('emailAddress', 'Unknown'))
+            email = p.get('emailAddress', '')
+            lines.append(f"• User: {name} <{email}> - {role}{expiry}")
+        elif ptype == 'group':
+            lines.append(f"• Group: {p.get('emailAddress', 'Unknown')} - {role}{expiry}")
+        elif ptype == 'domain':
+            lines.append(f"• Domain: {p.get('domain', 'Unknown')} - {role}{expiry}")
+        elif ptype == 'anyone':
+            lines.append(f"• Anyone with link - {role}{expiry}")
+    
+    return "\n".join(lines)
+
+@mcp.tool()
+def get_file_activity(file_id: str, max_results: int = 10) -> str:
+    """Get recent activity history for a file (views, edits, comments, shares)."""
+    activity = build_activity_service()
+    
+    try:
+        results = activity.activity().query(body={
+            "itemName": f"items/{file_id}",
+            "pageSize": max_results
+        }).execute()
+        
+        activities = results.get('activities', [])
+        if not activities:
+            return "No recent activity found for this file."
+        
+        lines = ["📊 FILE ACTIVITY:\n"]
+        for act in activities:
+            timestamp = act.get('timestamp', 'Unknown time')
+            actors = act.get('actors', [])
+            actor_names = []
+            for a in actors:
+                if 'user' in a:
+                    user = a['user'].get('knownUser', {})
+                    actor_names.append(user.get('personName', 'Unknown user'))
+            
+            action = act.get('primaryActionDetail', {})
+            action_type = list(action.keys())[0] if action else 'unknown'
+            
+            action_desc = {
+                'create': '📝 Created',
+                'edit': '✏️ Edited',
+                'move': '📁 Moved',
+                'rename': '🏷️ Renamed',
+                'delete': '🗑️ Deleted',
+                'restore': '♻️ Restored',
+                'permissionChange': '🔐 Permissions changed',
+                'comment': '💬 Commented',
+                'dlpChange': '🔒 DLP change',
+                'reference': '🔗 Referenced',
+            }.get(action_type, f'📋 {action_type}')
+            
+            actors_str = ', '.join(actor_names) if actor_names else 'Unknown'
+            lines.append(f"• {action_desc} by {actors_str}\n  Time: {timestamp}")
+        
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error getting activity: {e}"
+
+@mcp.tool()
+def list_file_revisions(file_id: str) -> str:
+    """List all revisions (version history) of a file."""
+    drive = build_drive_service()
+    
+    try:
+        revisions = drive.revisions().list(
+            fileId=file_id,
+            fields="revisions(id, modifiedTime, lastModifyingUser, size)",
+            pageSize=50
+        ).execute().get('revisions', [])
+        
+        if not revisions:
+            return "No revision history available for this file."
+        
+        lines = [f"📜 VERSION HISTORY ({len(revisions)} revisions):\n"]
+        for i, rev in enumerate(revisions, 1):
+            user = rev.get('lastModifyingUser', {})
+            user_name = user.get('displayName', user.get('emailAddress', 'Unknown'))
+            modified = rev.get('modifiedTime', 'Unknown')
+            size = rev.get('size', 'N/A')
+            if size != 'N/A':
+                size = f"{int(size) / 1024:.1f} KB"
+            
+            lines.append(f"• v{i} - {modified}\n  By: {user_name}\n  Size: {size}\n  Revision ID: {rev['id']}")
+        
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error getting revisions: {e}. Note: Google Docs/Sheets/Slides don't expose revision API."
+
+@mcp.tool()
+def list_comments(file_id: str) -> str:
+    """List all comments on a file."""
+    drive = build_drive_service()
+    
+    try:
+        comments = drive.comments().list(
+            fileId=file_id,
+            fields="comments(id, content, author, createdTime, resolved, replies)",
+            pageSize=50
+        ).execute().get('comments', [])
+        
+        if not comments:
+            return "No comments found on this file."
+        
+        lines = [f"💬 COMMENTS ({len(comments)}):\n"]
+        for c in comments:
+            author = c.get('author', {})
+            author_name = author.get('displayName', 'Unknown')
+            created = c.get('createdTime', 'Unknown')
+            content = c.get('content', '(no content)')
+            resolved = "✅ Resolved" if c.get('resolved') else "🔵 Open"
+            
+            lines.append(f"• {author_name} ({created}) [{resolved}]\n  \"{content}\"")
+            
+            replies = c.get('replies', [])
+            for r in replies:
+                reply_author = r.get('author', {}).get('displayName', 'Unknown')
+                reply_content = r.get('content', '(no content)')
+                lines.append(f"    ↳ {reply_author}: \"{reply_content}\"")
+        
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error getting comments: {e}"
 
 @mcp.tool()
 def read_file(file_id: str) -> str:
@@ -231,11 +507,9 @@ def list_folder(folder_id: str = "root") -> str:
     """List files in a Google Drive folder (supports shared drives). Use 'root' for all accessible files."""
     drive = build_drive_service()
     
-    # If root, show files from My Drive AND all shared drives
     if folder_id == "root":
         all_files = []
         
-        # Get files from My Drive root
         my_drive_results = drive.files().list(
             q="'root' in parents and trashed=false",
             fields="files(id, name, mimeType)",
@@ -245,12 +519,7 @@ def list_folder(folder_id: str = "root") -> str:
         ).execute().get('files', [])
         all_files.extend(my_drive_results)
         
-        # Get all shared drives and list their root contents
-        shared_drives = drive.drives().list(
-            pageSize=50,
-            fields="drives(id, name)"
-        ).execute().get('drives', [])
-        
+        shared_drives = drive.drives().list(pageSize=50, fields="drives(id, name)").execute().get('drives', [])
         for sd in shared_drives:
             sd_files = drive.files().list(
                 q=f"'{sd['id']}' in parents and trashed=false",
@@ -261,7 +530,6 @@ def list_folder(folder_id: str = "root") -> str:
                 includeItemsFromAllDrives=True,
                 supportsAllDrives=True
             ).execute().get('files', [])
-            # Mark files with their shared drive name
             for f in sd_files:
                 f['_drive_name'] = sd['name']
             all_files.extend(sd_files)
@@ -275,7 +543,6 @@ def list_folder(folder_id: str = "root") -> str:
             lines.append(f"• {f['name']} ({f['mimeType']}) - {f['id']}{drive_label}")
         return "\n".join(lines)
     
-    # For specific folder, just list its contents
     results = drive.files().list(
         q=f"'{folder_id}' in parents and trashed=false",
         fields="files(id, name, mimeType)",
@@ -293,10 +560,7 @@ def list_folder(folder_id: str = "root") -> str:
 def list_shared_drives() -> str:
     """List all shared drives accessible to the service account."""
     drive = build_drive_service()
-    results = drive.drives().list(
-        pageSize=50,
-        fields="drives(id, name)"
-    ).execute().get('drives', [])
+    results = drive.drives().list(pageSize=50, fields="drives(id, name)").execute().get('drives', [])
     
     if not results:
         return "No shared drives found. Make sure the service account is a member of the shared drive."
@@ -304,18 +568,50 @@ def list_shared_drives() -> str:
     return "\n".join([f"• {d['name']} (ID: {d['id']})" for d in results])
 
 @mcp.tool()
+def list_shared_drive_members(drive_id: str) -> str:
+    """List all members/permissions of a shared drive."""
+    drive = build_drive_service()
+    
+    try:
+        permissions = drive.permissions().list(
+            fileId=drive_id,
+            supportsAllDrives=True,
+            fields="permissions(id, type, role, emailAddress, displayName)"
+        ).execute().get('permissions', [])
+        
+        if not permissions:
+            return "No members found or unable to access shared drive permissions."
+        
+        lines = ["👥 SHARED DRIVE MEMBERS:\n"]
+        for p in permissions:
+            role = p.get('role', 'unknown')
+            ptype = p.get('type', 'unknown')
+            name = p.get('displayName', p.get('emailAddress', 'Unknown'))
+            email = p.get('emailAddress', '')
+            
+            role_emoji = {'organizer': '👑', 'fileOrganizer': '📁', 'writer': '✏️', 'commenter': '💬', 'reader': '👁️'}.get(role, '👤')
+            
+            if ptype == 'user':
+                lines.append(f"{role_emoji} {name} <{email}> - {role}")
+            elif ptype == 'group':
+                lines.append(f"{role_emoji} Group: {email} - {role}")
+        
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error listing shared drive members: {e}"
+
+# -----------------------------------------------------------------------------
+# DOCUMENT TOOLS
+# -----------------------------------------------------------------------------
+
+@mcp.tool()
 def read_spreadsheet(spreadsheet_id: str, range: str = "A1:Z1000") -> str:
     """Read data from a Google Spreadsheet."""
     sheets = build_sheets_service()
-    result = sheets.spreadsheets().values().get(
-        spreadsheetId=spreadsheet_id,
-        range=range
-    ).execute()
-    
+    result = sheets.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=range).execute()
     values = result.get('values', [])
     if not values:
         return "Spreadsheet is empty."
-    
     return "\n".join([",".join(str(c) for c in row) for row in values])
 
 @mcp.tool()
@@ -323,14 +619,12 @@ def read_document(document_id: str) -> str:
     """Read content from a Google Doc."""
     docs = build_docs_service()
     doc = docs.documents().get(documentId=document_id).execute()
-    
     content = []
     for elem in doc.get('body', {}).get('content', []):
         if 'paragraph' in elem:
             for el in elem['paragraph'].get('elements', []):
                 if 'textRun' in el:
                     content.append(el['textRun'].get('content', ''))
-    
     return f"# {doc.get('title', 'Untitled')}\n\n{''.join(content)}"
 
 @mcp.tool()
@@ -338,7 +632,6 @@ def read_presentation(presentation_id: str) -> str:
     """Read content from a Google Slides presentation."""
     slides = build_slides_service()
     pres = slides.presentations().get(presentationId=presentation_id).execute()
-    
     content = [f"# {pres.get('title', 'Untitled Presentation')}"]
     for i, slide in enumerate(pres.get('slides', []), 1):
         content.append(f"\n## Slide {i}")
@@ -347,8 +640,111 @@ def read_presentation(presentation_id: str) -> str:
                 for te in elem['shape']['text'].get('textElements', []):
                     if 'textRun' in te:
                         content.append(te['textRun'].get('content', '').strip())
-    
     return "\n".join(content)
+
+@mcp.tool()
+def read_form(form_id: str) -> str:
+    """Read questions and structure from a Google Form."""
+    forms = build_forms_service()
+    
+    try:
+        form = forms.forms().get(formId=form_id).execute()
+        
+        lines = [f"📋 FORM: {form.get('info', {}).get('title', 'Untitled Form')}\n"]
+        
+        if form.get('info', {}).get('description'):
+            lines.append(f"Description: {form['info']['description']}\n")
+        
+        items = form.get('items', [])
+        if not items:
+            lines.append("(No questions in this form)")
+        
+        for i, item in enumerate(items, 1):
+            title = item.get('title', '(Untitled question)')
+            
+            if 'questionItem' in item:
+                q = item['questionItem']['question']
+                required = "* " if q.get('required') else ""
+                
+                if 'choiceQuestion' in q:
+                    cq = q['choiceQuestion']
+                    q_type = cq.get('type', 'CHOICE')
+                    options = [opt.get('value', '') for opt in cq.get('options', [])]
+                    lines.append(f"{i}. {required}{title} [{q_type}]")
+                    for opt in options:
+                        lines.append(f"   ○ {opt}")
+                elif 'textQuestion' in q:
+                    paragraph = "paragraph" if q['textQuestion'].get('paragraph') else "short"
+                    lines.append(f"{i}. {required}{title} [TEXT - {paragraph}]")
+                elif 'scaleQuestion' in q:
+                    sq = q['scaleQuestion']
+                    lines.append(f"{i}. {required}{title} [SCALE: {sq.get('low', 1)}-{sq.get('high', 5)}]")
+                elif 'dateQuestion' in q:
+                    lines.append(f"{i}. {required}{title} [DATE]")
+                elif 'timeQuestion' in q:
+                    lines.append(f"{i}. {required}{title} [TIME]")
+                elif 'fileUploadQuestion' in q:
+                    lines.append(f"{i}. {required}{title} [FILE UPLOAD]")
+                else:
+                    lines.append(f"{i}. {required}{title}")
+            
+            elif 'pageBreakItem' in item:
+                lines.append(f"\n--- Page Break: {title} ---\n")
+            elif 'textItem' in item:
+                lines.append(f"\n📝 {title}")
+            elif 'imageItem' in item:
+                lines.append(f"🖼️ [Image: {title}]")
+            elif 'videoItem' in item:
+                lines.append(f"🎬 [Video: {title}]")
+        
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error reading form: {e}"
+
+@mcp.tool()
+def read_form_responses(form_id: str) -> str:
+    """Read all responses submitted to a Google Form."""
+    forms = build_forms_service()
+    
+    try:
+        form = forms.forms().get(formId=form_id).execute()
+        form_title = form.get('info', {}).get('title', 'Untitled Form')
+        
+        items = form.get('items', [])
+        question_map = {}
+        for item in items:
+            if 'questionItem' in item:
+                qid = item['questionItem']['question'].get('questionId')
+                if qid:
+                    question_map[qid] = item.get('title', 'Unknown question')
+        
+        responses = forms.forms().responses().list(formId=form_id).execute()
+        response_list = responses.get('responses', [])
+        
+        if not response_list:
+            return f"No responses submitted to form: {form_title}"
+        
+        lines = [f"📊 RESPONSES FOR: {form_title}\nTotal responses: {len(response_list)}\n"]
+        
+        for i, resp in enumerate(response_list, 1):
+            lines.append(f"\n--- Response {i} ---")
+            lines.append(f"Submitted: {resp.get('lastSubmittedTime', 'Unknown')}")
+            
+            answers = resp.get('answers', {})
+            for qid, answer_data in answers.items():
+                question = question_map.get(qid, f'Question {qid}')
+                answer = answer_data.get('textAnswers', {})
+                answer_values = [a.get('value', '') for a in answer.get('answers', [])]
+                lines.append(f"Q: {question}")
+                lines.append(f"A: {', '.join(answer_values)}")
+        
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error reading form responses: {e}"
+
+# -----------------------------------------------------------------------------
+# CALENDAR TOOLS
+# -----------------------------------------------------------------------------
 
 @mcp.tool()
 def list_calendars() -> str:
@@ -386,26 +782,62 @@ def list_events(calendar_id: str = "primary", max_results: int = 10) -> str:
     return "\n".join(lines)
 
 @mcp.tool()
-def find_person(query: str) -> str:
-    """Search the company directory for a person. Note: Requires domain-wide delegation to access directory."""
+def search_calendar_events(calendar_id: str = "primary", query: str = "", time_min: str = "", time_max: str = "", max_results: int = 20) -> str:
+    """Search calendar events by keyword and/or date range.
+    
+    Args:
+        calendar_id: Calendar ID (use 'primary' for main calendar)
+        query: Search term to find in event titles/descriptions
+        time_min: Start of date range (ISO format, e.g., '2024-01-01T00:00:00Z')
+        time_max: End of date range (ISO format, e.g., '2024-12-31T23:59:59Z')
+        max_results: Maximum number of results to return
+    """
+    cal = build_calendar_service()
+    
     try:
-        people = build_people_service()
-        results = people.people().searchDirectoryPeople(
-            query=query,
-            readMask="names,emailAddresses",
-            sources=["DIRECTORY_SOURCE_TYPE_DOMAIN_CONTACT"]
-        ).execute()
+        params = {
+            'calendarId': calendar_id,
+            'maxResults': max_results,
+            'singleEvents': True,
+            'orderBy': 'startTime'
+        }
         
-        persons = results.get('people', [])
-        if not persons:
-            return "No people found."
+        if query:
+            params['q'] = query
+        if time_min:
+            params['timeMin'] = time_min
+        else:
+            params['timeMin'] = datetime.datetime.utcnow().isoformat() + 'Z'
+        if time_max:
+            params['timeMax'] = time_max
         
-        return "\n".join([
-            f"• {p['names'][0]['displayName']} <{p['emailAddresses'][0]['value']}>"
-            for p in persons if p.get('names') and p.get('emailAddresses')
-        ])
+        events = cal.events().list(**params).execute().get('items', [])
+        
+        if not events:
+            return "No events found matching your criteria."
+        
+        lines = [f"📅 CALENDAR EVENTS ({len(events)} found):\n"]
+        for e in events:
+            start = e['start'].get('dateTime', e['start'].get('date'))
+            end = e['end'].get('dateTime', e['end'].get('date'))
+            summary = e.get('summary', '(No title)')
+            location = e.get('location', '')
+            
+            lines.append(f"• {summary}")
+            lines.append(f"  Start: {start}")
+            lines.append(f"  End: {end}")
+            if location:
+                lines.append(f"  Location: {location}")
+            if e.get('description'):
+                desc = e['description'][:100] + '...' if len(e.get('description', '')) > 100 else e.get('description', '')
+                lines.append(f"  Description: {desc}")
+            lines.append("")
+        
+        return "\n".join(lines)
     except Exception as e:
-        return f"Error searching directory: {e}. Directory search requires domain-wide delegation."
+        return f"Error searching calendar: {e}"
+
+
 
 # =============================================================================
 # 6. OAUTH PROXY ENDPOINTS
@@ -597,36 +1029,24 @@ async def health_check(request: Request):
 
 @asynccontextmanager
 async def lifespan(app: Starlette):
-    """Manage MCP session manager lifecycle."""
     async with mcp.session_manager.run():
         logger.info("🚀 MCP session manager started")
         yield
     logger.info("👋 MCP session manager stopped")
 
-# Get the streamable HTTP app from FastMCP
 mcp_app = mcp.streamable_http_app()
-
-# Create the combined app with MCP at root
-from starlette.routing import Route, Mount
 
 app = Starlette(
     routes=[
-        # OAuth Discovery - must come before MCP mount
         Route("/.well-known/oauth-authorization-server", endpoint=oauth_well_known),
         Route("/.well-known/oauth-protected-resource", endpoint=oauth_protected_resource),
-        Route("/.well-known/oauth-protected-resource/mcp", endpoint=oauth_protected_resource),  # Claude looks here too
+        Route("/.well-known/oauth-protected-resource/mcp", endpoint=oauth_protected_resource),
         Route("/.well-known/openid-configuration", endpoint=oauth_well_known),
-        
-        # OAuth Flow
         Route("/authorize", endpoint=oauth_authorize, methods=["GET"]),
         Route("/oauth2callback", endpoint=oauth_callback, methods=["GET"]),
         Route("/token", endpoint=oauth_token, methods=["POST"]),
         Route("/register", endpoint=oauth_register, methods=["POST"]),
-        
-        # Health check
         Route("/health", endpoint=health_check),
-        
-        # MCP endpoint at root - Claude expects this
         Mount("/", app=mcp_app),
     ],
     lifespan=lifespan,
