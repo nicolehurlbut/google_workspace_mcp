@@ -568,6 +568,218 @@ def list_shared_drives() -> str:
     return "\n".join([f"• {d['name']} (ID: {d['id']})" for d in results])
 
 @mcp.tool()
+def list_all_folders(drive_id: str, include_files: bool = True) -> str:
+    """List ALL folders (and optionally files) in a shared drive with their full paths.
+    
+    Args:
+        drive_id: The shared drive ID
+        include_files: If True, also list files in each folder (default: True)
+    """
+    drive = build_drive_service()
+    
+    # Get all folders in the drive
+    all_folders = []
+    page_token = None
+    
+    while True:
+        results = drive.files().list(
+            q="mimeType='application/vnd.google-apps.folder' and trashed=false",
+            driveId=drive_id,
+            corpora="drive",
+            fields="nextPageToken, files(id, name, parents)",
+            pageSize=1000,
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+            pageToken=page_token
+        ).execute()
+        
+        all_folders.extend(results.get('files', []))
+        page_token = results.get('nextPageToken')
+        if not page_token:
+            break
+    
+    if not all_folders:
+        return "No folders found in this shared drive."
+    
+    # Build folder lookup and parent-child relationships
+    folder_map = {f['id']: f for f in all_folders}
+    folder_map[drive_id] = {'id': drive_id, 'name': '(root)', 'parents': []}
+    
+    # Function to get full path
+    def get_path(folder_id, visited=None):
+        if visited is None:
+            visited = set()
+        if folder_id in visited:
+            return "(circular)"
+        visited.add(folder_id)
+        
+        folder = folder_map.get(folder_id)
+        if not folder:
+            return "(unknown)"
+        if folder_id == drive_id:
+            return ""
+        
+        parents = folder.get('parents', [])
+        if not parents or parents[0] == drive_id:
+            return folder['name']
+        
+        parent_path = get_path(parents[0], visited)
+        if parent_path:
+            return f"{parent_path}/{folder['name']}"
+        return folder['name']
+    
+    # Build paths for all folders
+    folder_paths = []
+    for f in all_folders:
+        path = get_path(f['id'])
+        folder_paths.append({
+            'id': f['id'],
+            'name': f['name'],
+            'path': path
+        })
+    
+    # Sort by path
+    folder_paths.sort(key=lambda x: x['path'].lower())
+    
+    lines = [f"📁 ALL FOLDERS IN SHARED DRIVE ({len(folder_paths)} folders):\n"]
+    
+    for fp in folder_paths:
+        lines.append(f"📁 /{fp['path']}")
+        lines.append(f"   ID: {fp['id']}")
+        
+        if include_files:
+            # Get files in this folder
+            files = drive.files().list(
+                q=f"'{fp['id']}' in parents and mimeType!='application/vnd.google-apps.folder' and trashed=false",
+                driveId=drive_id,
+                corpora="drive",
+                fields="files(id, name, mimeType)",
+                pageSize=100,
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True
+            ).execute().get('files', [])
+            
+            for file in files:
+                lines.append(f"   📄 {file['name']} ({file['mimeType']}) - {file['id']}")
+    
+    return "\n".join(lines)
+
+@mcp.tool()
+def get_folder_contents(folder_id: str, recursive: bool = True) -> str:
+    """Get all contents of a specific folder.
+    
+    Args:
+        folder_id: The folder ID to list contents of
+        recursive: If True, also list contents of all subfolders (default: True)
+    """
+    drive = build_drive_service()
+    
+    def list_folder_contents(fid, path="", depth=0):
+        results = []
+        indent = "  " * depth
+        
+        # Get all items in this folder
+        items = drive.files().list(
+            q=f"'{fid}' in parents and trashed=false",
+            fields="files(id, name, mimeType)",
+            pageSize=1000,
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True
+        ).execute().get('files', [])
+        
+        # Separate folders and files
+        folders = [i for i in items if i['mimeType'] == 'application/vnd.google-apps.folder']
+        files = [i for i in items if i['mimeType'] != 'application/vnd.google-apps.folder']
+        
+        # Sort alphabetically
+        folders.sort(key=lambda x: x['name'].lower())
+        files.sort(key=lambda x: x['name'].lower())
+        
+        # Add folders first
+        for f in folders:
+            results.append(f"{indent}📁 {f['name']} (ID: {f['id']})")
+            if recursive:
+                results.extend(list_folder_contents(f['id'], f"{path}/{f['name']}", depth + 1))
+        
+        # Then files
+        for f in files:
+            results.append(f"{indent}📄 {f['name']} - {f['id']}")
+        
+        return results
+    
+    # Get folder name
+    try:
+        folder_meta = drive.files().get(
+            fileId=folder_id,
+            fields="name",
+            supportsAllDrives=True
+        ).execute()
+        folder_name = folder_meta.get('name', 'Unknown')
+    except:
+        folder_name = folder_id
+    
+    lines = [f"📂 CONTENTS OF: {folder_name}\n"]
+    contents = list_folder_contents(folder_id)
+    
+    if not contents:
+        lines.append("(empty folder)")
+    else:
+        lines.extend(contents)
+    
+    return "\n".join(lines)
+
+@mcp.tool()
+def get_drive_structure(drive_id: str) -> str:
+    """Get the complete folder and file structure of a shared drive as a tree view."""
+    drive = build_drive_service()
+    
+    # Get drive name
+    try:
+        drive_info = drive.drives().get(driveId=drive_id, fields="name").execute()
+        drive_name = drive_info.get('name', 'Shared Drive')
+    except:
+        drive_name = "Shared Drive"
+    
+    def build_tree(parent_id, depth=0):
+        results = []
+        indent = "│   " * depth
+        
+        items = drive.files().list(
+            q=f"'{parent_id}' in parents and trashed=false",
+            driveId=drive_id,
+            corpora="drive",
+            fields="files(id, name, mimeType)",
+            pageSize=1000,
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True
+        ).execute().get('files', [])
+        
+        folders = sorted([i for i in items if i['mimeType'] == 'application/vnd.google-apps.folder'], key=lambda x: x['name'].lower())
+        files = sorted([i for i in items if i['mimeType'] != 'application/vnd.google-apps.folder'], key=lambda x: x['name'].lower())
+        
+        all_items = folders + files
+        
+        for i, item in enumerate(all_items):
+            is_last = (i == len(all_items) - 1)
+            connector = "└── " if is_last else "├── "
+            
+            if item['mimeType'] == 'application/vnd.google-apps.folder':
+                results.append(f"{indent}{connector}📁 {item['name']} [{item['id']}]")
+                results.extend(build_tree(item['id'], depth + 1))
+            else:
+                results.append(f"{indent}{connector}📄 {item['name']} [{item['id']}]")
+        
+        return results
+    
+    lines = [f"🗂️ {drive_name} (ID: {drive_id})", ""]
+    lines.extend(build_tree(drive_id))
+    
+    if len(lines) == 2:
+        lines.append("(empty drive)")
+    
+    return "\n".join(lines)
+
+@mcp.tool()
 def list_shared_drive_members(drive_id: str) -> str:
     """List all members/permissions of a shared drive."""
     drive = build_drive_service()
