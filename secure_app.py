@@ -958,6 +958,13 @@ def read_form_responses(form_id: str) -> str:
 # CALENDAR TOOLS
 # -----------------------------------------------------------------------------
 
+# Default calendar ID for SingleFile
+DEFAULT_CALENDAR_ID = "singlefile.co_jm7i3fj1oqsk3kok5ajgromsh4@group.calendar.google.com"
+
+def get_default_calendar_id():
+    """Get the default calendar ID."""
+    return DEFAULT_CALENDAR_ID
+
 @mcp.tool()
 def list_calendars() -> str:
     """List all calendars accessible to the service account."""
@@ -968,9 +975,14 @@ def list_calendars() -> str:
     return "\n".join([f"• {c['summary']} (ID: {c['id']})" for c in calendars])
 
 @mcp.tool()
-def list_events(calendar_id: str = "primary", max_results: int = 10) -> str:
-    """List upcoming events from a calendar."""
+def list_events(calendar_id: str = "", max_results: int = 10) -> str:
+    """List upcoming events from a calendar. If no calendar_id provided, uses the first available calendar."""
     cal = build_calendar_service()
+    
+    # Auto-detect calendar if not specified
+    if not calendar_id:
+        calendar_id = get_default_calendar_id()
+    
     now = datetime.datetime.utcnow().isoformat() + 'Z'
     try:
         events = cal.events().list(
@@ -986,25 +998,38 @@ def list_events(calendar_id: str = "primary", max_results: int = 10) -> str:
     if not events:
         return "No upcoming events."
     
-    lines = []
+    lines = [f"📅 UPCOMING EVENTS:\n"]
     for e in events:
         start = e['start'].get('dateTime', e['start'].get('date'))
-        lines.append(f"• {e['summary']} - {start}")
+        end = e['end'].get('dateTime', e['end'].get('date'))
+        summary = e.get('summary', '(No title)')
+        location = e.get('location', '')
+        
+        lines.append(f"• {summary}")
+        lines.append(f"  Start: {start}")
+        lines.append(f"  End: {end}")
+        if location:
+            lines.append(f"  Location: {location}")
+        lines.append("")
     
     return "\n".join(lines)
 
 @mcp.tool()
-def search_calendar_events(calendar_id: str = "primary", query: str = "", time_min: str = "", time_max: str = "", max_results: int = 20) -> str:
+def search_calendar_events(query: str = "", time_min: str = "", time_max: str = "", calendar_id: str = "", max_results: int = 20) -> str:
     """Search calendar events by keyword and/or date range.
     
     Args:
-        calendar_id: Calendar ID (use 'primary' for main calendar)
         query: Search term to find in event titles/descriptions
         time_min: Start of date range (ISO format, e.g., '2024-01-01T00:00:00Z')
         time_max: End of date range (ISO format, e.g., '2024-12-31T23:59:59Z')
+        calendar_id: Calendar ID (auto-detects if not provided)
         max_results: Maximum number of results to return
     """
     cal = build_calendar_service()
+    
+    # Auto-detect calendar if not specified
+    if not calendar_id:
+        calendar_id = get_default_calendar_id()
     
     try:
         params = {
