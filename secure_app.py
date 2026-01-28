@@ -170,23 +170,53 @@ mcp = FastMCP(
 
 @mcp.tool()
 def search_drive(query: str) -> str:
-    """Search Google Drive files by query string (includes shared drives)."""
+    """Search Google Drive files by query string (searches all shared drives automatically)."""
     drive = build_drive_service()
-    results = drive.files().list(
+    all_results = []
+    
+    # Search in My Drive and files shared with me
+    my_drive_results = drive.files().list(
         q=f"fullText contains '{query}'",
-        fields="files(id, name, mimeType, modifiedTime, webViewLink, driveId)",
+        fields="files(id, name, mimeType, modifiedTime, webViewLink)",
         pageSize=20,
         includeItemsFromAllDrives=True,
         supportsAllDrives=True
     ).execute().get('files', [])
+    all_results.extend(my_drive_results)
     
-    if not results:
+    # Search in each shared drive
+    shared_drives = drive.drives().list(
+        pageSize=50,
+        fields="drives(id, name)"
+    ).execute().get('drives', [])
+    
+    for sd in shared_drives:
+        try:
+            sd_results = drive.files().list(
+                q=f"fullText contains '{query}'",
+                driveId=sd['id'],
+                corpora="drive",
+                fields="files(id, name, mimeType, modifiedTime, webViewLink)",
+                pageSize=20,
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True
+            ).execute().get('files', [])
+            for f in sd_results:
+                f['_drive_name'] = sd['name']
+            all_results.extend(sd_results)
+        except Exception as e:
+            logger.warning(f"Error searching shared drive {sd['name']}: {e}")
+    
+    if not all_results:
         return "No files found."
     
-    return "\n".join([
-        f"• {f['name']} ({f['mimeType']})\n  ID: {f['id']}\n  Modified: {f.get('modifiedTime', 'N/A')}\n  Link: {f.get('webViewLink', 'N/A')}"
-        for f in results
-    ])
+    lines = []
+    for f in all_results:
+        drive_label = f" [Shared Drive: {f['_drive_name']}]" if '_drive_name' in f else ""
+        lines.append(
+            f"• {f['name']} ({f['mimeType']}){drive_label}\n  ID: {f['id']}\n  Modified: {f.get('modifiedTime', 'N/A')}\n  Link: {f.get('webViewLink', 'N/A')}"
+        )
+    return "\n".join(lines)
 
 @mcp.tool()
 def read_file(file_id: str) -> str:
@@ -198,11 +228,57 @@ def read_file(file_id: str) -> str:
 
 @mcp.tool()
 def list_folder(folder_id: str = "root") -> str:
-    """List files in a Google Drive folder (supports shared drives). Use 'root' for the root folder."""
+    """List files in a Google Drive folder (supports shared drives). Use 'root' for all accessible files."""
     drive = build_drive_service()
+    
+    # If root, show files from My Drive AND all shared drives
+    if folder_id == "root":
+        all_files = []
+        
+        # Get files from My Drive root
+        my_drive_results = drive.files().list(
+            q="'root' in parents and trashed=false",
+            fields="files(id, name, mimeType)",
+            pageSize=50,
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True
+        ).execute().get('files', [])
+        all_files.extend(my_drive_results)
+        
+        # Get all shared drives and list their root contents
+        shared_drives = drive.drives().list(
+            pageSize=50,
+            fields="drives(id, name)"
+        ).execute().get('drives', [])
+        
+        for sd in shared_drives:
+            sd_files = drive.files().list(
+                q=f"'{sd['id']}' in parents and trashed=false",
+                driveId=sd['id'],
+                corpora="drive",
+                fields="files(id, name, mimeType)",
+                pageSize=50,
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True
+            ).execute().get('files', [])
+            # Mark files with their shared drive name
+            for f in sd_files:
+                f['_drive_name'] = sd['name']
+            all_files.extend(sd_files)
+        
+        if not all_files:
+            return "No files found. Make sure files/drives are shared with the service account."
+        
+        lines = []
+        for f in all_files:
+            drive_label = f" [Shared Drive: {f['_drive_name']}]" if '_drive_name' in f else ""
+            lines.append(f"• {f['name']} ({f['mimeType']}) - {f['id']}{drive_label}")
+        return "\n".join(lines)
+    
+    # For specific folder, just list its contents
     results = drive.files().list(
         q=f"'{folder_id}' in parents and trashed=false",
-        fields="files(id, name, mimeType, driveId)",
+        fields="files(id, name, mimeType)",
         pageSize=50,
         includeItemsFromAllDrives=True,
         supportsAllDrives=True
